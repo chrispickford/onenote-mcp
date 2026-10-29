@@ -176,14 +176,14 @@ def _deleted(fake: _FakeReplaceApp) -> list[str]:
     return [arg for call, arg in fake.calls if call == "delete"]
 
 
-def test_replace_deletes_every_object_but_the_title_then_writes(monkeypatch):
+def test_replace_writes_then_deletes_every_old_object_but_the_title(monkeypatch):
     fake = _FakeReplaceApp()
     _use(monkeypatch, fake)
     com._replace_page_impl("{PAGE}", _NEW_PAGE, frozenset())
 
     assert _deleted(fake) == ["outline-1", "ink-1", "outline-2", "file-1"]
-    assert [call for call, _ in fake.calls][-1] == "update"
-    assert ET.fromstring(fake.calls[-1][1]).find(f"{{{_ONE_NS}}}Title").get("objectID") == "title"
+    assert [call for call, _ in fake.calls][0] == "update"
+    assert ET.fromstring(fake.calls[0][1]).find(f"{{{_ONE_NS}}}Title").get("objectID") == "title"
 
 
 def test_replace_keeps_objects_whose_tag_is_kept(monkeypatch):
@@ -194,14 +194,14 @@ def test_replace_keeps_objects_whose_tag_is_kept(monkeypatch):
     assert _deleted(fake) == ["outline-1", "outline-2"]
 
 
-def test_replace_attempts_every_delete_and_writes_before_reporting_a_partial_write(monkeypatch):
+def test_replace_writes_then_attempts_every_delete_before_reporting_a_partial_write(monkeypatch):
     fake = _FakeReplaceApp(undeletable=frozenset({"outline-1", "file-1"}))
     _use(monkeypatch, fake)
     with pytest.raises(OneNoteError) as exc:
         com._replace_page_impl("{PAGE}", _NEW_PAGE, frozenset())
 
     assert _deleted(fake) == ["outline-1", "ink-1", "outline-2", "file-1"]
-    assert [call for call, _ in fake.calls][-1] == "update"
+    assert [call for call, _ in fake.calls][0] == "update"
     assert exc.value.code == "partial_write"
     message = str(exc.value)
     assert message.startswith("partial_write: The new content was written, but 2 old page object(s)")
@@ -360,3 +360,76 @@ def test_restore_into_new_page_when_page_gone(monkeypatch, clean_pagestate, _bac
     assert result["page_id"] == "{NEWPAGE}" and result["restored_over"] is False
     written = ET.fromstring([arg for call, arg in fake.calls if call == "update"][-1])
     assert written.get("ID") == "{NEWPAGE}"
+
+
+# ---------------------------------------------------------------------------
+# write before delete, and content replace cannot re-create
+# ---------------------------------------------------------------------------
+
+def test_replace_writes_before_deleting(monkeypatch, clean_pagestate):
+    fake = _FakeReplaceApp()
+    _use(monkeypatch, fake)
+    com._replace_page_impl("{PAGE}", _NEW_PAGE, frozenset(), pagestate.revision(_CURRENT_PAGE))
+    calls = [call for call, _ in fake.calls]
+    assert calls[0] == "update"
+    assert set(calls[1:]) == {"delete"}
+
+
+_PROTECTED_PAGE = (
+    f'<one:Page {_XMLNS} ID="{{PAGE}}">'
+    '<one:Title objectID="title"><one:OE><one:T>Old</one:T></one:OE></one:Title>'
+    '<one:Outline objectID="outline-1"><one:OEChildren>'
+    '<one:OE objectID="p-1"><one:T>a</one:T></one:OE>'
+    '<one:OE objectID="att-1"><one:InsertedFile preferredName="a.pdf"/></one:OE>'
+    '<one:OE objectID="p-2"><one:T>b</one:T><one:OEChildren>'
+    '<one:OE objectID="ink-2"><one:InkParagraph/></one:OE></one:OEChildren></one:OE>'
+    '</one:OEChildren></one:Outline></one:Page>'
+)
+
+
+class _FakeProtectedApp(_FakeReplaceApp):
+    def GetPageContent(self, page_id: str, page_info: int) -> str:
+        return _PROTECTED_PAGE
+
+
+def test_replace_refuses_page_with_attachment(monkeypatch, clean_pagestate, _backup_dir):
+    fake = _FakeProtectedApp()
+    _use(monkeypatch, fake)
+    with pytest.raises(OneNoteError) as exc:
+        com._replace_page_impl("{PAGE}", _NEW_PAGE, frozenset(), pagestate.revision(_PROTECTED_PAGE))
+    assert exc.value.code == "bad_request"
+    message = str(exc.value)
+    assert "file att-1" in message and "ink ink-2" in message
+    assert "remove_ids" in message
+    assert fake.calls == []
+    assert backups.list_backups(_backup_dir) == []
+
+
+def test_remove_ids_must_cover_every_protected_item(monkeypatch, clean_pagestate):
+    fake = _FakeProtectedApp()
+    _use(monkeypatch, fake)
+    with pytest.raises(OneNoteError) as exc:
+        com._replace_page_impl("{PAGE}", _NEW_PAGE, frozenset(), pagestate.revision(_PROTECTED_PAGE),
+                               remove_ids=frozenset({"att-1"}))
+    assert "ink ink-2" in str(exc.value) and "att-1" not in str(exc.value)
+
+
+def test_remove_ids_allows_removal(monkeypatch, clean_pagestate):
+    fake = _FakeProtectedApp()
+    _use(monkeypatch, fake)
+    com._replace_page_impl("{PAGE}", _NEW_PAGE, frozenset(), pagestate.revision(_PROTECTED_PAGE),
+                           remove_ids=frozenset({"att-1", "ink-2"}))
+    assert _deleted(fake) == ["outline-1"]
+
+
+def test_protected_items_lists_nested_unsupported_oes():
+    from onenote_mcp.builders import protected_items
+    assert protected_items(ET.fromstring(_PROTECTED_PAGE)) == [("att-1", "file"), ("ink-2", "ink")]
+
+
+def test_restore_over_page_with_protected_items_replaces_them(monkeypatch, clean_pagestate, _backup_dir):
+    fake = _FakeProtectedApp()
+    _use(monkeypatch, fake)
+    backup_id = backups.save(fake, "{PAGE}", "replace_page", root=_backup_dir, retention_days=30)
+    com.restore_page(backup_id)
+    assert _deleted(fake) == ["outline-1"]

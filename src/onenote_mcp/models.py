@@ -143,6 +143,7 @@ class UnsupportedItem(BaseModel):
     """
 
     type: Literal["unsupported"]
+    id: str | None = Field(None, description="Read-only: OneNote objectID of this item; list it in replace_page's remove_ids to delete it deliberately.")
     kind: UnsupportedKind = Field(description=_UNSUPPORTED_KIND_DESCRIPTION)
     text: str = Field("", description=_UNSUPPORTED_TEXT_DESCRIPTION)
     children: list[ContentItem] = Field(default_factory=list, description="Content indented one level under this item, in order.")

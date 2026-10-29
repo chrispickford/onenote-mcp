@@ -150,3 +150,15 @@ def test_restorable_xml_points_attachments_at_backup_files(tmp_path):
     file_el = page.find(f".//{{{_ONE_NS}}}InsertedFile")
     assert file_el.get("pathCache") is None
     assert file_el.get("pathSource") == str(root / backup_id / "files" / meta["attachments"]["{F}"])
+
+
+def test_restorable_xml_drops_given_canvas_tags(tmp_path):
+    page = (f'<one:Page {_XMLNS} ID="{{P}}"><one:Title><one:OE><one:T>T</one:T></one:OE></one:Title>'
+            '<one:InkDrawing objectID="{I}"/><one:Outline><one:OEChildren><one:OE><one:T>x</one:T></one:OE>'
+            '</one:OEChildren></one:Outline></one:Page>')
+    backup_id = backups.save(_FakeApp(page), "{P}", "t", root=tmp_path, retention_days=30)
+    xml, meta = backups.load(tmp_path, backup_id)
+    out = ET.fromstring(backups.restorable_xml(
+        tmp_path, backup_id, xml, meta, "{P}", drop_tags=frozenset({f"{{{_ONE_NS}}}InkDrawing"}),
+    ))
+    assert [child.tag.split("}")[1] for child in out] == ["Title", "Outline"]

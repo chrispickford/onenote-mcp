@@ -52,6 +52,7 @@ import comtypes.client
 import comtypes.typeinfo
 
 from onenote_mcp import backups, config, pagestate
+from onenote_mcp.builders import UNSUPPORTED_PAGE_OBJECT_TAGS, protected_items
 from onenote_mcp.images import pixel_size
 
 _ONE_NS = "http://schemas.microsoft.com/office/onenote/2013/onenote"
@@ -679,6 +680,21 @@ def _partial_write_error(failures: list[str]) -> OneNoteError:
     )
 
 
+def _refuse_protected(page_root: ET.Element, remove_ids: frozenset[str]) -> None:
+    """Raise bad_request if the page holds content a rewrite cannot re-create
+    (attachments, handwriting, media, ...) that *remove_ids* does not list."""
+    blocking = [(object_id, kind) for object_id, kind in protected_items(page_root) if object_id not in remove_ids]
+    if not blocking:
+        return
+    listed = ", ".join(f"{kind} {object_id}" for object_id, kind in blocking)
+    raise OneNoteError(
+        f"The page holds content a rewrite cannot re-create: {listed}. Rewriting the page "
+        "would delete it. Change the other content with targeted edits instead, or list "
+        "these IDs in remove_ids if deleting them is intended.",
+        code="bad_request",
+    )
+
+
 def _backup(app, page_id: str, tool: str) -> str:
     """Back up *page_id* before *tool* changes it; return the backup_id.
 
@@ -698,20 +714,24 @@ def _replace_page_impl(
     keep_tags: frozenset[str],
     expected_revision: str | None = None,
     tool: str = "replace_page",
+    remove_ids: frozenset[str] = frozenset(),
 ) -> None:
     """Full-replace implementation — runs on the worker thread.
 
     See replace_page docstring for full semantics.  With *expected_revision*
     the page must still have that revision, else conflict before any write.
-    The page is backed up (as *tool*) before anything is written.
+    Content inside outlines that a rewrite cannot re-create must be listed in
+    *remove_ids*, else bad_request before any write.  The page is backed up
+    (as *tool*) before anything is written.
     """
     app = _app()
     _ensure_allowed(app, page_id, "Page")
 
     current_xml = app.GetPageContent(page_id, 0)
     pagestate.check(page_id, current_xml, expected_revision)
-    _backup(app, page_id, tool)
     current_root = ET.fromstring(current_xml)
+    _refuse_protected(current_root, remove_ids)
+    _backup(app, page_id, tool)
 
     # --- prepare write XML (before any deletion) ---
     root = ET.fromstring(page_xml)
@@ -736,14 +756,16 @@ def _replace_page_impl(
     # GetBinaryPageContent, which would fail if we deleted the image first.
     serialized = _complete_image_sizes(_resolve_mcpref_to_data(serialized, app))
 
-    # --- delete-pass: remove the existing top-level objects via DeletePageContent ---
-    failures = _delete_page_objects(app, page_id, _objects_to_delete(current_root, keep_tags))
-
-    # --- write-pass: insert the new content ---
-    # Written even after failed deletions: stopping here would leave a page
-    # with part of its old content and none of the new.
-    # Pass 0.0 for dateExpectedLastModified (OLE date epoch = no conflict check)
+    # --- write-pass first: if it fails, the old content is still all there ---
+    # Pass 0.0 for dateExpectedLastModified (OLE date epoch = no conflict check;
+    # the revision check above replaces it).
     app.UpdatePageContent(serialized, 0.0)
+
+    # --- delete-pass: remove the old top-level objects via DeletePageContent ---
+    # Their IDs come from the read before the write, so the new content (which
+    # got fresh IDs) is never touched.  A failed delete leaves extra old
+    # content, never an empty page.
+    failures = _delete_page_objects(app, page_id, _objects_to_delete(current_root, keep_tags))
     pagestate.after_write(
         page_id, before_xml=current_xml, after_xml=app.GetPageContent(page_id, 0), checked=True,
     )
@@ -991,6 +1013,7 @@ def replace_page(
     page_xml: str,
     keep_tags: frozenset[str] = frozenset(),
     expected_revision: str | None = None,
+    remove_ids: frozenset[str] = frozenset(),
 ) -> None:
     """Full-replace the page identified by *page_id* with *page_xml*.
 
@@ -1005,19 +1028,23 @@ def replace_page(
     the other dimension from the image's aspect ratio.
 
     Implementation note: OneNote UpdatePageContent is an upsert keyed on
-    objectID.  To achieve a true replace, this function first issues a
-    delete-pass that calls DeletePageContent for every top-level child of the
-    current page (except <one:Title> and the elements whose tag is in
-    *keep_tags*, which stay where they are), then writes the new content.
-    DeletePageContent handles all object types including images and ink — no
-    special-casing is required.  Every deletion is attempted and the new
-    content is written even if some fail; OneNoteError(code="partial_write")
-    then lists the objects that are still on the page.
+    objectID.  To achieve a true replace, this function first writes the new
+    content (with fresh IDs), then calls DeletePageContent for every top-level
+    child the page had before (except <one:Title> and the elements whose tag
+    is in *keep_tags*, which stay where they are).  Writing first means a
+    failure leaves extra old content, never an empty page.  Every deletion is
+    attempted; OneNoteError(code="partial_write") then lists the objects that
+    are still on the page.  Before anything is written the page is backed up,
+    and content inside outlines that a rewrite cannot re-create (attachments,
+    handwriting, media) must be listed in *remove_ids*, else bad_request.
     """
     _parse_user_xml(page_xml, "page")
     expected = pagestate.expected(page_id, expected_revision, required=True)
     try:
-        _run_com(_replace_page_impl, page_id, page_xml, keep_tags, expected, timeout=WRITE_TIMEOUT)
+        _run_com(
+            _replace_page_impl, page_id, page_xml, keep_tags, expected, "replace_page", remove_ids,
+            timeout=WRITE_TIMEOUT,
+        )
     except comtypes.COMError as exc:
         raise OneNoteError(
             f"replace_page failed (page {page_id!r}): hresult={exc.hresult:#010x}"
@@ -1075,10 +1102,18 @@ def _restore_page_impl(backup_id: str, target_section_id: str | None) -> dict:
             )
         _ensure_allowed(app, target_section_id, "Section")
         page_id = app.CreateNewPage(target_section_id)
-    xml = backups.restorable_xml(root, backup_id, page_xml, meta, page_id)
-    # The backup replaces everything, canvas objects included; the page's
-    # current state is backed up first, so the restore can be undone too.
-    _replace_page_impl(page_id, xml, frozenset(), None, "restore_page")
+    # Canvas objects (handwriting, files on the canvas) are never changed by a
+    # replace, so the current ones stay and the backup's copies are dropped.
+    # Everything inside outlines is restored; the protected items there are
+    # replaced deliberately.  The page's current state is backed up first, so
+    # the restore can be undone too.
+    xml = backups.restorable_xml(root, backup_id, page_xml, meta, page_id, drop_tags=UNSUPPORTED_PAGE_OBJECT_TAGS)
+    current_protected = frozenset(
+        object_id for object_id, _ in protected_items(ET.fromstring(app.GetPageContent(page_id, 0)))
+    )
+    _replace_page_impl(
+        page_id, xml, UNSUPPORTED_PAGE_OBJECT_TAGS, None, "restore_page", current_protected,
+    )
     return {
         "page_id": page_id,
         "restored_over": restored_over,

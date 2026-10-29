@@ -945,6 +945,30 @@ UNSUPPORTED_PAGE_OBJECT_TAGS: frozenset[str] = frozenset(
 )
 
 
+def protected_items(page_root: ET.Element) -> list[tuple[str, str]]:
+    """Return (objectID, kind) of every OE inside an outline whose content a
+    rewrite cannot re-create (see _UNSUPPORTED_KINDS), in document order.
+
+    Rewriting the page deletes its outlines, so replace refuses unless each of
+    these is listed for removal.  Content nested inside a listed OE is not
+    listed again.
+    """
+    found: list[tuple[str, str]] = []
+
+    def walk(el: ET.Element) -> None:
+        for child in el:
+            if child.tag == f"{{{_ONE_NS}}}OE":
+                content = _unsupported_content(child)
+                if content is not None:
+                    found.append((child.get("objectID", ""), _UNSUPPORTED_KINDS[content.tag]))
+                    continue
+            walk(child)
+
+    for outline_el in page_root.findall(f"{{{_ONE_NS}}}Outline"):
+        walk(outline_el)
+    return found
+
+
 def _unsupported_content(oe_el: ET.Element) -> ET.Element | None:
     """Return the first child of *oe_el* the slim model cannot represent, if any."""
     return next((child for child in oe_el if child.tag in _UNSUPPORTED_KINDS), None)
@@ -988,6 +1012,7 @@ def _parse_unsupported_oe(oe_el: ET.Element, children: list[ContentItem]) -> Uns
     texts = (_readable_text(child) for child in oe_el if child.tag != f"{{{_ONE_NS}}}OEChildren")
     return UnsupportedItem(
         type="unsupported",
+        id=oe_el.get("objectID"),
         kind=_UNSUPPORTED_KINDS[_unsupported_content(oe_el).tag],
         text=" ".join(text for text in texts if text),
         children=children,

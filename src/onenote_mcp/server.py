@@ -358,11 +358,19 @@ async def create_page(section_id: str, title: str, parent_page_id: str | None = 
 
 
 @_tool(raw_xml=True)
-async def replace_page_xml(page_id: str, page_xml: str, expected_revision: str | None = None) -> str:
+async def replace_page_xml(
+    page_id: str,
+    page_xml: str,
+    expected_revision: str | None = None,
+    remove_ids: list[str] | None = None,
+) -> str:
     """Advanced / escape-hatch only. Prefer replace_page (typed slim tool) unless you
     need direct XML control or are debugging a OneNote schema issue.
 
-    Replace the full content of a OneNote page.
+    Replace the full content of a OneNote page. Same protections as replace_page:
+    the page is backed up first, objects in get_page's top-level `unsupported`
+    list stay in place, and unsupported items inside outlines must be listed in
+    remove_ids or the replace is refused.
 
     page_id: ID attribute of the target page (from list_pages or create_page).
     expected_revision: optional. The page must still have this revision (from get_page),
@@ -416,7 +424,10 @@ async def replace_page_xml(page_id: str, page_xml: str, expected_revision: str |
     content sits.
     """
     try:
-        await asyncio.to_thread(_replace_page_com, page_id, page_xml, expected_revision=expected_revision)
+        await asyncio.to_thread(
+            _replace_page_com, page_id, page_xml, UNSUPPORTED_PAGE_OBJECT_TAGS,
+            expected_revision=expected_revision, remove_ids=frozenset(remove_ids or ()),
+        )
         return "ok"
     except OneNoteError as exc:
         raise _fail(exc) from exc
@@ -468,6 +479,7 @@ async def replace_page(
     outlines: list[Outline],
     images: list[FloatingImage] | None = None,
     expected_revision: str | None = None,
+    remove_ids: list[str] | None = None,
 ) -> str:
     """Replace the full content of a OneNote page using structured typed content.
 
@@ -507,16 +519,21 @@ async def replace_page(
             None if the page has no floating images.
 
     Returns "ok" on success.
-    Note: all existing page content is deleted before the new content is written,
-    except the objects in get_page's top-level `unsupported` list (e.g.
+    Note: the new content is written first, then all old page content is
+    deleted, except the objects in get_page's top-level `unsupported` list (e.g.
     handwriting on the canvas): they stay in place at their position, so place
-    new content where it does not overlap them.
+    new content where it does not overlap them. The page is backed up first
+    (see list_backups / restore_page).
+    remove_ids: IDs of 'unsupported' items inside outlines (attachments,
+              handwriting, recordings) that rewriting may delete. A page holding
+              such items is refused with bad_request unless every one is listed;
+              to keep them, change the other content with targeted edits instead.
     """
     try:
         page_xml = build_page_xml(title, outlines, images)
         await asyncio.to_thread(
             _replace_page_com, page_id, page_xml, UNSUPPORTED_PAGE_OBJECT_TAGS,
-            expected_revision=expected_revision,
+            expected_revision=expected_revision, remove_ids=frozenset(remove_ids or ()),
         )
         return "ok"
     except (OneNoteError, ValueError) as exc:

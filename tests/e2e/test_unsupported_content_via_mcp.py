@@ -58,6 +58,7 @@ def test_get_page_reports_table_and_indented_paragraph(mcp_session, claudespike_
     page_id = _seed_page(mcp_session, claudespike_section_id, f"test-unsupported-{int(time.time())}")
 
     table, parent = mcp_session.call_tool("get_page", {"page_id": page_id})["outlines"][0]["items"]
+    assert table.pop("id")
     assert table == {"type": "unsupported", "kind": "table", "text": "A1 | B1\nA2 | B2"}
     assert parent == _PARENT
 
@@ -74,9 +75,16 @@ def test_replace_page_refuses_to_drop_the_table(mcp_session, claudespike_section
         })
     assert mcp_session.call_tool("get_page", {"page_id": page_id})["outlines"] == content["outlines"]
 
-    # Removing the marker deliberately deletes the table; the indented child stays.
+    # Leaving the marker out is not enough: the page still holds the table.
+    with pytest.raises(RuntimeError, match=r"bad_request: The page holds content a rewrite cannot re-create: table"):
+        mcp_session.call_tool("replace_page", {
+            "page_id": page_id, "title": title, "outlines": [{"items": [_PARENT]}],
+        })
+
+    # Listing its ID in remove_ids deletes the table deliberately; the indented child stays.
+    table_id = content["outlines"][0]["items"][0]["id"]
     result = mcp_session.call_tool("replace_page", {
-        "page_id": page_id, "title": title, "outlines": [{"items": [_PARENT]}],
+        "page_id": page_id, "title": title, "outlines": [{"items": [_PARENT]}], "remove_ids": [table_id],
     })
     assert result == "ok", f"replace_page returned {result!r}"
     assert mcp_session.call_tool("get_page", {"page_id": page_id})["outlines"][0]["items"] == [_PARENT]
@@ -125,9 +133,10 @@ def test_replace_page_keeps_a_file_attached_to_the_canvas(mcp_session, claudespi
     (kept,) = content["unsupported"]
     assert _without_z(kept) == _without_z(attached)
 
-    # The raw tool still replaces everything: its caller supplies the full page.
+    # The raw tool has the same protection: the canvas file stays.
     page_xml = (
         f'<one:Page xmlns:one="{_ONE_NS}"><one:Title><one:OE><one:T>{title}</one:T></one:OE></one:Title></one:Page>'
     )
     assert mcp_session.call_tool("replace_page_xml", {"page_id": page_id, "page_xml": page_xml}) == "ok"
-    assert "unsupported" not in mcp_session.call_tool("get_page", {"page_id": page_id})
+    (still_there,) = mcp_session.call_tool("get_page", {"page_id": page_id})["unsupported"]
+    assert still_there["text"] == "attachment.txt"

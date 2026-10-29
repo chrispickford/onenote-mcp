@@ -1895,3 +1895,13 @@ def test_placeholders_nested_under_paragraphs_and_list_items_round_trip():
     items = parse_page(build_page_xml("Doc", [outline])).outlines[0].items
     assert items[0].children == [ph]
     assert items[1].items[0].children == [ph]
+
+
+def test_unsupported_item_reports_its_object_id():
+    from onenote_mcp.builders import parse_page
+    ns = "http://schemas.microsoft.com/office/onenote/2013/onenote"
+    xml = (f'<one:Page xmlns:one="{ns}"><one:Title><one:OE><one:T>t</one:T></one:OE></one:Title>'
+           '<one:Outline><one:OEChildren><one:OE objectID="{X}{1}{B0}"><one:InsertedFile preferredName="a.pdf"/>'
+           '</one:OE></one:OEChildren></one:Outline></one:Page>')
+    (item,) = parse_page(xml).outlines[0].items
+    assert item.type == "unsupported" and item.id == "{X}{1}{B0}"

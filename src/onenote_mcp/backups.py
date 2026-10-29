@@ -188,16 +188,26 @@ def load(root: Path, backup_id: str) -> tuple[str, dict]:
     return (folder / "page.xml").read_text(encoding="utf-8"), meta
 
 
-def restorable_xml(root: Path, backup_id: str, page_xml: str, meta: dict, target_page_id: str) -> str:
+def restorable_xml(
+    root: Path,
+    backup_id: str,
+    page_xml: str,
+    meta: dict,
+    target_page_id: str,
+    drop_tags: frozenset[str] = frozenset(),
+) -> str:
     """Return the backed-up page as XML that writes it as new content on *target_page_id*.
 
     objectIDs are dropped, and attachments point at the files saved in the
     backup instead of OneNote's temporary cache.  Attachments whose file was
-    not saved are left out.
+    not saved are left out, and so are direct page children whose tag is in
+    *drop_tags* (canvas objects the restore keeps on the page instead).
     """
     page_root = ET.fromstring(page_xml)
     page_root.attrib.clear()
     page_root.set("ID", target_page_id)
+    for child in [child for child in page_root if child.tag in drop_tags]:
+        page_root.remove(child)
     files_dir = Path(root) / backup_id / "files"
     parent_of = {child: parent for parent in page_root.iter() for child in parent}
     for file_el in list(page_root.iter(_q("InsertedFile"))):

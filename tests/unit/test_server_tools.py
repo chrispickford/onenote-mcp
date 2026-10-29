@@ -103,19 +103,20 @@ def test_write_tools_reject_unsupported_items_before_touching_onenote(monkeypatc
     assert calls == []
 
 
-def test_only_the_structured_replace_keeps_unsupported_page_objects(monkeypatch):
+def test_both_replace_tools_keep_unsupported_page_objects_and_pass_remove_ids(monkeypatch):
     calls = []
-    monkeypatch.setattr(server, "_replace_page_com", lambda *args, **kwargs: calls.append(args))
+    monkeypatch.setattr(server, "_replace_page_com", lambda *args, **kwargs: calls.append((args, kwargs)))
     page_xml = '<one:Page xmlns:one="http://schemas.microsoft.com/office/onenote/2013/onenote"/>'
     asyncio.run(server.create_server().call_tool(
-        "replace_page", {"page_id": "p", "title": "t", "outlines": []},
+        "replace_page", {"page_id": "p", "title": "t", "outlines": [], "remove_ids": ["a"]},
     ))
     asyncio.run(server.create_server(raw_xml_tools=True).call_tool(
-        "replace_page_xml", {"page_id": "p", "page_xml": page_xml},
+        "replace_page_xml", {"page_id": "p", "page_xml": page_xml, "remove_ids": ["b"]},
     ))
-    structured, raw = calls
+    (structured, structured_kw), (raw, raw_kw) = calls
     assert structured[0] == "p" and structured[2] == server.UNSUPPORTED_PAGE_OBJECT_TAGS
-    assert raw == ("p", page_xml)
+    assert raw == ("p", page_xml, server.UNSUPPORTED_PAGE_OBJECT_TAGS)
+    assert structured_kw["remove_ids"] == frozenset({"a"}) and raw_kw["remove_ids"] == frozenset({"b"})
 
 
 def test_replace_page_ignores_the_read_only_outline_height(monkeypatch):
@@ -125,7 +126,7 @@ def test_replace_page_ignores_the_read_only_outline_height(monkeypatch):
     asyncio.run(server.create_server().call_tool(
         "replace_page", {"page_id": "p", "title": "t", "outlines": [read_outline]},
     ))
-    ((_, page_xml, _),) = calls
+    ((_, page_xml, _),) = [args for args in calls]
     assert "Size" not in page_xml and "134.27" not in page_xml
 
 
