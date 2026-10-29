@@ -603,3 +603,39 @@ def test_edits_register_as_writes_to_their_page(monkeypatch):
     com.insert_items("{PAGE}", [Paragraph(type="paragraph", text="x")], after_id="a")
     com.update_item("{PAGE}", "a", Paragraph(type="paragraph", text="x"), expected_revision="r")
     assert seen == ["{PAGE}", "{PAGE}"]
+
+
+def test_replace_text_counts_and_zero_matches_write_nothing(monkeypatch, clean_pagestate, _backup_dir):
+    fake = _FakeEditApp()
+    _use(monkeypatch, fake)
+    pagestate.remember("{PAGE}", pagestate.revision(_EDIT_PAGE))
+    result = com.replace_text("{PAGE}", "zzz", "y")
+    assert result["replacements"] == 0 and fake.calls == []
+    assert backups.list_backups(_backup_dir) == []
+
+    result = com.replace_text("{PAGE}", "BETA", "gamma")
+    assert result["replacements"] == 1
+    ((call, xml),) = fake.calls
+    assert "gamma" in xml
+
+
+def test_rename_page_updates_title_only(monkeypatch, clean_pagestate, _backup_dir):
+    fake = _FakeEditApp()
+    _use(monkeypatch, fake)
+    com.rename_page("{PAGE}", "New <title> & more")
+    ((call, xml),) = fake.calls
+    page = ET.fromstring(xml)
+    assert [child.tag.split("}")[1] for child in page] == ["Title"]
+    assert page.find(f"{{{_ONE_NS}}}Title").get("objectID") == "title"
+    assert page.find(f".//{{{_ONE_NS}}}T").text == "New &lt;title&gt; &amp; more"
+    assert backups.list_backups(_backup_dir)[0]["tool"] == "rename_page"
+
+
+def test_set_tag_needs_a_read(monkeypatch, clean_pagestate):
+    from onenote_mcp.models import Tag
+    fake = _FakeEditApp()
+    _use(monkeypatch, fake)
+    with pytest.raises(OneNoteError, match="Read the page with get_page first"):
+        com.set_tag("{PAGE}", "a", Tag(kind="todo"))
+    com.set_tag("{PAGE}", "a", Tag(kind="todo"), expected_revision=pagestate.revision(_EDIT_PAGE))
+    assert "Tag" in fake.calls[0][1]

@@ -234,3 +234,70 @@ def test_update_protected_item_refused():
     body = _BODY.replace('<one:T>beta</one:T>', '<one:InsertedFile preferredName="a.pdf"/>')
     with pytest.raises(OneNoteError, match="cannot be changed"):
         edits.update_item(_page(body), "b", Paragraph(type="paragraph", text="x"))
+
+
+# ---------------------------------------------------------------------------
+# find and replace, tags
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("html, find, replace, case, expected, count", [
+    ("Gate A and gate b", "gate", "Door", False, "Door A and Door b", 2),
+    ("Gate A and gate b", "gate", "Door", True, "Gate A and Door b", 1),
+    ('<span style="font-weight:bold">Foo</span> bar', "Foo", "Baz", False,
+     '<span style="font-weight:bold">Baz</span> bar', 1),
+    ("x", "x", "a<b&c", False, "a&lt;b&amp;c", 1),
+    ('<a href="https://foo.example/">foo</a>', "foo", "bar", False, '<a href="https://foo.example/">bar</a>', 1),
+    ("Tom &amp; Jerry", "&", "and", False, "Tom and Jerry", 1),
+    ('<span style="font-weight:bold">Fo</span>o', "Foo", "X", False, '<span style="font-weight:bold">Fo</span>o', 0),
+    ("nothing here", "zzz", "y", False, "nothing here", 0),
+])
+def test_replace_text_in_html(html, find, replace, case, expected, count):
+    assert edits.replace_text_in_html(html, find, replace, case) == (expected, count)
+
+
+def test_replace_text_across_page_skips_title_and_counts():
+    page = _page(_BODY)
+    edit, count = edits.replace_text(page, "alpha", "ALPHA", False)
+    assert count == 2
+    (outline,) = _xml(page, edit).findall(q("Outline"))
+    assert [t.text for t in outline.iter(q("T"))][:2] == ["ALPHA", "ALPHA child"]
+
+
+def test_replace_text_in_one_item_only():
+    page = _page(_BODY)
+    edit, count = edits.replace_text(page, "alpha", "ALPHA", False, item_id="a")
+    assert count == 1
+    texts = [t.text for t in _xml(page, edit).iter(q("T"))]
+    assert "ALPHA" in texts and "alpha child" in texts
+
+
+def test_replace_text_reaches_table_cells():
+    body = ('<one:Outline objectID="o"><one:OEChildren><one:OE objectID="t"><one:Table><one:Row><one:Cell>'
+            '<one:OEChildren><one:OE objectID="c"><one:T>gate</one:T></one:OE></one:OEChildren>'
+            '</one:Cell></one:Row></one:Table></one:OE></one:OEChildren></one:Outline>')
+    page = _page(body)
+    _, count = edits.replace_text(page, "gate", "door", False, item_id="t")
+    assert count == 1
+
+
+def test_zero_matches_touches_nothing():
+    edit, count = edits.replace_text(_page(_BODY), "zzz", "y", False)
+    assert count == 0 and edit.outlines == []
+
+
+def test_set_tag_and_clear():
+    page = _page(_BODY, '<one:TagDef index="2" type="0" symbol="3" name="To Do"/>')
+    edit = edits.set_tag(page, "b", Tag(kind="todo", checked=True))
+    oe = _xml(page, edit).find(f".//{q('OE')}[@objectID='b']")
+    assert oe.find(q("Tag")).attrib == {"index": "2", "completed": "true"}
+    assert list(oe)[0].tag == q("Tag")
+
+    edit = edits.set_tag(page, "b", None)
+    assert _xml(page, edit).find(f".//{q('OE')}[@objectID='b']").find(q("Tag")) is None
+
+
+def test_set_tag_replaces_an_existing_tag():
+    page = _page(_BODY)
+    edits.set_tag(page, "b", Tag(kind="todo"))
+    edit = edits.set_tag(page, "b", Tag(kind="important"))
+    assert len(_xml(page, edit).find(f".//{q('OE')}[@objectID='b']").findall(q("Tag"))) == 1

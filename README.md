@@ -185,6 +185,9 @@ edited this way (re-sending it would lose them); attachments and images are kept
 | `insert_items` | Insert items before or after an item, or at the start or end of an outline. Needs no prior read. |
 | `delete_items` | Delete items with the content indented under them; an emptied outline is removed. Needs a prior `get_page`. |
 | `move_item` | Move an item next to another or under it as its last child. Needs a prior `get_page`. |
+| `replace_text` | Find and replace text in one item or across the page (not the title), keeping formatting and links. Needs a prior `get_page`. |
+| `rename_page` | Change a page's title without touching its content. Needs no prior read. |
+| `set_tag` | Set, change or clear the tag of one item (e.g. tick a to-do). Needs a prior `get_page`. |
 
 ### Health
 

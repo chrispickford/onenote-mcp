@@ -51,8 +51,11 @@ from onenote_mcp.com import (
     insert_items as _insert_items_com,
     delete_items as _delete_items_com,
     move_item as _move_item_com,
+    replace_text as _replace_text_com,
+    rename_page as _rename_page_com,
+    set_tag as _set_tag_com,
 )
-from onenote_mcp.models import FloatingImage, ListChild, Outline, PageContent
+from onenote_mcp.models import FloatingImage, ListChild, Outline, PageContent, Tag
 from onenote_mcp.builders import (
     UNSUPPORTED_PAGE_OBJECT_TAGS,
     build_page_xml, build_append_xml, parse_section_pages, parse_page,
@@ -704,6 +707,65 @@ async def move_item(
             _move_item_com, page_id, item_id, before_id=before_id, after_id=after_id,
             under_id=under_id, expected_revision=expected_revision,
         )
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def replace_text(
+    page_id: str,
+    find: str,
+    replace: str,
+    match_case: bool = False,
+    item_id: str | None = None,
+    expected_revision: str | None = None,
+) -> dict:
+    """Find and replace text on a page, keeping its formatting.
+
+    Replaces every occurrence of find (case-insensitive unless match_case) in the
+    page's outlines, or with item_id only in that item's own text (a table item:
+    in all its cells). The title is not searched; use rename_page. Formatting,
+    links and styles are kept; a match that spans two differently formatted runs
+    is not replaced. With no match nothing is written.
+    expected_revision: as in replace_page; the page must have been read with get_page.
+
+    Returns {"replacements": n, "revision": "<new revision or null>"}.
+    """
+    try:
+        return await asyncio.to_thread(
+            _replace_text_com, page_id, find, replace,
+            match_case=match_case, item_id=item_id, expected_revision=expected_revision,
+        )
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def rename_page(page_id: str, title: str, expected_revision: str | None = None) -> str:
+    """Change a page's title without touching its content.
+
+    Needs no prior read; expected_revision is optional. The page is backed up first.
+    Returns "ok".
+    """
+    try:
+        return await asyncio.to_thread(_rename_page_com, page_id, title, expected_revision=expected_revision)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def set_tag(page_id: str, item_id: str, tag: Tag | None, expected_revision: str | None = None) -> dict:
+    """Set, change or clear the tag of one paragraph or list item.
+
+    tag: {"kind": "todo" | "important" | "question", "checked": false}, e.g. to tick
+    a to-do box pass {"kind": "todo", "checked": true}; null removes the item's tag.
+    The item's other content is unchanged.
+    expected_revision: as in replace_page; the page must have been read with get_page.
+
+    Returns {"ok": true, "revision": "<new revision or null>", "ids": []}.
+    """
+    try:
+        return await asyncio.to_thread(_set_tag_com, page_id, item_id, tag, expected_revision=expected_revision)
     except (OneNoteError, ValueError) as exc:
         raise _fail(exc) from exc
 

@@ -272,3 +272,17 @@ def test_delete_and_move_tools(monkeypatch):
 def test_every_tool_has_a_description():
     tools = asyncio.run(server.create_server(raw_xml_tools=True).list_tools())
     assert [tool.name for tool in tools if not (tool.description or "").strip()] == []
+
+
+def test_replace_text_rename_and_set_tag_tools(monkeypatch):
+    replaces = _record(monkeypatch, "_replace_text_com")
+    renames = []
+    monkeypatch.setattr(server, "_rename_page_com", lambda *args, **kwargs: renames.append((args, kwargs)) or "ok")
+    tags = _record(monkeypatch, "_set_tag_com")
+    _call("replace_text", {"page_id": "p", "find": "a", "replace": "b", "match_case": True, "item_id": "i"})
+    _call("rename_page", {"page_id": "p", "title": "T"})
+    _call("set_tag", {"page_id": "p", "item_id": "i", "tag": {"kind": "todo", "checked": True}})
+    _call("set_tag", {"page_id": "p", "item_id": "i", "tag": None})
+    assert replaces[0][0][:3] == ("p", "a", "b") and replaces[0][1] == {"match_case": True, "item_id": "i", "expected_revision": None}
+    assert renames[0][0] == ("p", "T")
+    assert tags[0][0][2].checked is True and tags[1][0][2] is None

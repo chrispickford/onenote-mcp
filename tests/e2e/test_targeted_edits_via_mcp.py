@@ -96,3 +96,28 @@ def test_list_item_update_and_heading_insert(mcp_session, claudespike_section_id
         {"type": "paragraph", "text": "Next steps", "style": "h2"},
         {"type": "paragraph", "text": "Summary", "style": "h3"},
     ]
+
+
+@pytest.mark.e2e
+def test_replace_text_rename_and_set_tag(mcp_session, claudespike_section_id):
+    page_id = mcp_session.call_tool("create_page", {"section_id": claudespike_section_id, "title": "Find replace"})
+    mcp_session.call_tool("replace_page", {"page_id": page_id, "title": "Find replace", "outlines": [{"items": [
+        {"type": "paragraph", "segments": [{"text": "Meet at "}, {"text": "Gate A", "bold": True}, {"text": " by gate b"}]},
+        {"type": "table", "rows": [["gate", "time"], ["Gate C", "09:00"]]},
+        {"type": "paragraph", "text": "Check radios"},
+    ]}]})
+
+    result = mcp_session.call_tool("replace_text", {"page_id": page_id, "find": "gate", "replace": "Door"})
+    assert result["replacements"] == 4
+    assert mcp_session.call_tool("replace_text", {"page_id": page_id, "find": "nowhere", "replace": "x"})["replacements"] == 0
+
+    mcp_session.call_tool("rename_page", {"page_id": page_id, "title": "Find & replace <done>"})
+    items = _items(mcp_session, page_id)
+    mcp_session.call_tool("set_tag", {"page_id": page_id, "item_id": items[2]["id"], "tag": {"kind": "todo", "checked": True}})
+
+    content = mcp_session.call_tool("get_page", {"page_id": page_id})
+    assert content["title"] == "Find & replace <done>"
+    first, table, last = without_ids(content["outlines"][0]["items"])
+    assert first == {"type": "paragraph", "segments": [{"text": "Meet at "}, {"text": "Door A", "bold": True}, {"text": " by Door b"}]}
+    assert [[cell["items"][0]["text"] for cell in row] for row in table["rows"]] == [["Door", "time"], ["Door C", "09:00"]]
+    assert last == {"type": "paragraph", "text": "Check radios", "tag": {"kind": "todo", "checked": True}}

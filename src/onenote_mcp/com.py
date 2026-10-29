@@ -1204,6 +1204,8 @@ def _edit_page_impl(page_id: str, tool: str, operation, args: tuple, expected_re
     pagestate.check(page_id, current_xml, expected_revision)
     page_root = ET.fromstring(app.GetPageContent(page_id, 1))
     edit = operation(page_root, *args)
+    if not edit.outlines and not edit.delete_outline_ids:
+        return {"ok": True, "revision": pagestate.remembered(page_id), "ids": [], "replacements": 0}
     for new_oe in edit.new_oes:
         _check_insert_paths(ET.tostring(new_oe, encoding="unicode"))
     _backup(app, page_id, tool)
@@ -1222,6 +1224,7 @@ def _edit_page_impl(page_id: str, tool: str, operation, args: tuple, expected_re
         "ok": True,
         "revision": pagestate.remembered(page_id),
         "ids": [object_id for object_id in _oe_ids(after_xml) if object_id not in before],
+        "replacements": edit.replacements,
     }
 
 
@@ -1275,3 +1278,63 @@ def move_item(
         page_id, "move_item", edits.move_item, (item_id, before_id, after_id, under_id),
         expected_revision, required=True,
     )
+
+
+def _replace_text_op(page_root: ET.Element, find: str, replace: str, match_case: bool, item_id: str | None):
+    edit, _ = edits.replace_text(page_root, find, replace, match_case, item_id)
+    return edit
+
+
+def replace_text(
+    page_id: str,
+    find: str,
+    replace: str,
+    match_case: bool = False,
+    item_id: str | None = None,
+    expected_revision: str | None = None,
+) -> dict:
+    """Replace text in one item or the whole page (not the title); returns
+    {"replacements", "revision"}.  No match writes nothing."""
+    result = _edit(
+        page_id, "replace_text", _replace_text_op, (find, replace, match_case, item_id),
+        expected_revision, required=True,
+    )
+    return {"replacements": result["replacements"], "revision": result["revision"]}
+
+
+def set_tag(page_id: str, item_id: str, tag, expected_revision: str | None = None) -> dict:
+    """Set (or with None clear) the tag of one item."""
+    return _edit(page_id, "set_tag", edits.set_tag, (item_id, tag), expected_revision, required=True)
+
+
+def _rename_page_impl(page_id: str, title: str, expected_revision: str | None) -> None:
+    app = _app()
+    _ensure_allowed(app, page_id, "Page")
+    current_xml = app.GetPageContent(page_id, 0)
+    pagestate.check(page_id, current_xml, expected_revision)
+    _backup(app, page_id, "rename_page")
+    page_el = ET.Element(f"{{{_ONE_NS}}}Page", {"ID": page_id})
+    title_el = ET.SubElement(page_el, _TITLE_TAG)
+    existing = ET.fromstring(current_xml).find(_TITLE_TAG)
+    if existing is not None and existing.get("objectID"):
+        # Updating the title in place: OneNote would otherwise add a second one.
+        title_el.set("objectID", existing.get("objectID"))
+    oe_el = ET.SubElement(title_el, f"{{{_ONE_NS}}}OE")
+    # OneNote reads <one:T> content as HTML.
+    ET.SubElement(oe_el, f"{{{_ONE_NS}}}T").text = html.escape(title, quote=False)
+    app.UpdatePageContent(ET.tostring(page_el, encoding="unicode", xml_declaration=False), 0.0)
+    pagestate.after_write(
+        page_id, before_xml=current_xml, after_xml=app.GetPageContent(page_id, 0),
+        checked=expected_revision is not None,
+    )
+
+
+def rename_page(page_id: str, title: str, expected_revision: str | None = None) -> str:
+    """Set a page's title without touching its content; needs no prior read."""
+    if not title.strip():
+        raise OneNoteError("title must not be empty.", code="bad_request")
+    try:
+        _run_com(_rename_page_impl, page_id, title, expected_revision, timeout=WRITE_TIMEOUT, write_page_id=page_id)
+    except comtypes.COMError as exc:
+        raise OneNoteError(f"rename_page failed (page {page_id!r}): hresult={exc.hresult:#010x}") from exc
+    return "ok"

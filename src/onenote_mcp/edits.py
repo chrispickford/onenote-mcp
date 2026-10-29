@@ -12,6 +12,8 @@ re-sent, so an outline that still holds any is refused.  Pure functions; no COM.
 """
 
 from dataclasses import dataclass, field
+import html as _html_module
+import re
 import xml.etree.ElementTree as ET
 
 from onenote_mcp.builders import (
@@ -19,7 +21,7 @@ from onenote_mcp.builders import (
     quick_style_def_el, tag_def_el, tag_symbol,
 )
 from onenote_mcp.errors import OneNoteError
-from onenote_mcp.models import ListChild, ListItem
+from onenote_mcp.models import ListChild, ListItem, Tag
 
 _ONE_NS = "http://schemas.microsoft.com/office/onenote/2013/onenote"
 _RESEND_UNSAFE = frozenset({"ink", "media", "unknown"})
@@ -39,6 +41,7 @@ class Edit:
     tag_defs: list[ET.Element] = field(default_factory=list)
     quick_style_defs: list[ET.Element] = field(default_factory=list)
     new_oes: list[ET.Element] = field(default_factory=list)
+    replacements: int = 0
 
 
 # ---- Lookups -----------------------------------------------------------------
@@ -97,11 +100,9 @@ def _build(page_root: ET.Element, items: list[ListChild], list_style: str, edit:
     edit.cdata_map.update(cdata_map)
     edit.new_oes.extend(oes)
     page_qsds = page_root.findall(_q("QuickStyleDef")) + edit.quick_style_defs
-    page_tags = page_root.findall(_q("TagDef")) + edit.tag_defs
     heading_by_local = {index: name for name, index in HEADING_QUICK_STYLE_INDEX.items()}
     tag_by_local = {index: kind for kind, index in TAG_LOCAL_INDEX.items()}
     qsd_index: dict[str, str] = {}
-    tag_index: dict[str, str] = {}
     for oe in [el for root in oes for el in root.iter(_q("OE"))]:
         local = oe.get("quickStyleIndex")
         if local is not None:
@@ -116,16 +117,19 @@ def _build(page_root: ET.Element, items: list[ListChild], list_style: str, edit:
                 qsd_index[name] = existing.get("index")
             oe.set("quickStyleIndex", qsd_index[name])
         for tag in oe.findall(_q("Tag")):
-            kind = tag_by_local[tag.get("index")]
-            if kind not in tag_index:
-                existing = next((d for d in page_tags if d.get("symbol") == tag_symbol(kind)), None)
-                if existing is None:
-                    existing = tag_def_el(kind, str(_max_index(page_tags) + 1))
-                    page_tags.append(existing)
-                    edit.tag_defs.append(existing)
-                tag_index[kind] = existing.get("index")
-            tag.set("index", tag_index[kind])
+            tag.set("index", _tag_index(page_root, tag_by_local[tag.get("index")], edit))
     return oes
+
+
+def _tag_index(page_root: ET.Element, kind: str, edit: Edit) -> str:
+    """Return the page's TagDef index for *kind* (matched by symbol), adding a
+    new TagDef at the next free index to *edit* when the page has none."""
+    page_tags = page_root.findall(_q("TagDef")) + edit.tag_defs
+    existing = next((d for d in page_tags if d.get("symbol") == tag_symbol(kind)), None)
+    if existing is None:
+        existing = tag_def_el(kind, str(_max_index(page_tags) + 1))
+        edit.tag_defs.append(existing)
+    return existing.get("index")
 
 
 # ---- Sending -------------------------------------------------------------------
@@ -296,4 +300,85 @@ def move_item(
     edit = Edit()
     _touch(edit, source_outline)
     _touch(edit, target_outline)
+    return _finish(page_root, edit)
+
+
+# ---- Find and replace, tags ------------------------------------------------------
+
+_MARKUP = re.compile(r"(<[^>]*>)")
+
+
+def replace_text_in_html(html: str, find: str, replace: str, match_case: bool) -> tuple[str, int]:
+    """Replace *find* in the visible text of a <one:T> HTML fragment.
+
+    Tags (and so attribute values such as link targets and styles) are kept
+    verbatim; only text between them changes, unescaped for matching and the
+    replacement escaped.  A match spanning two formatting runs is not
+    replaced.  Returns (new HTML, number of replacements).
+    """
+    pattern = re.compile(re.escape(find), 0 if match_case else re.IGNORECASE)
+    total = 0
+    parts = _MARKUP.split(html)
+    for index in range(0, len(parts), 2):  # even indexes are text, odd ones markup
+        text = _html_module.unescape(parts[index])
+        new_text, count = pattern.subn(lambda _: replace, text)
+        if count:
+            total += count
+            parts[index] = _html_module.escape(new_text, quote=False)
+    return "".join(parts), total
+
+
+def _own_text_elements(oe: ET.Element) -> list[ET.Element]:
+    """The <one:T> of an OE itself, plus those in a table it holds (not its children)."""
+    texts = oe.findall(_q("T"))
+    table = oe.find(_q("Table"))
+    if table is not None:
+        texts.extend(table.iter(_q("T")))
+    return texts
+
+
+def replace_text(
+    page_root: ET.Element,
+    find: str,
+    replace: str,
+    match_case: bool,
+    item_id: str | None = None,
+) -> tuple[Edit, int]:
+    """Replace *find* with *replace* in one item (its own text, or a table's
+    cells) or in every outline of the page (not the title).
+
+    Returns (edit, number of replacements); with none the edit sends nothing.
+    """
+    if not find:
+        raise OneNoteError("find must not be empty.", code="bad_request")
+    edit = Edit()
+    if item_id is not None:
+        oe, _, outline = find_oe(page_root, item_id)
+        scopes = [(outline, _own_text_elements(oe))]
+    else:
+        scopes = [(outline, list(outline.iter(_q("T")))) for outline in page_root.findall(_q("Outline"))]
+    total = 0
+    for outline, texts in scopes:
+        for t_el in texts:
+            new_html, count = replace_text_in_html(t_el.text or "", find, replace, match_case)
+            if count:
+                t_el.text = new_html
+                total += count
+                _touch(edit, outline)
+    edit.replacements = total
+    return _finish(page_root, edit), total
+
+
+def set_tag(page_root: ET.Element, item_id: str, tag: Tag | None) -> Edit:
+    """Set the tag of item *item_id* to *tag*, replacing any tag it has; None clears it."""
+    oe, _, outline = find_oe(page_root, item_id)
+    for old in oe.findall(_q("Tag")):
+        oe.remove(old)
+    edit = Edit()
+    if tag is not None:
+        oe.insert(0, ET.Element(_q("Tag"), {
+            "index": _tag_index(page_root, tag.kind, edit),
+            "completed": "true" if tag.checked else "false",
+        }))
+    _touch(edit, outline)
     return _finish(page_root, edit)
