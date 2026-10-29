@@ -226,3 +226,49 @@ def test_restore_page_tool(monkeypatch):
     })
     (content,) = _call("restore_page", {"backup_id": "b"})
     assert json.loads(content.text)["restored_over"] is True
+
+
+# ---------------------------------------------------------------------------
+# targeted edit tools
+# ---------------------------------------------------------------------------
+
+def _record(monkeypatch, name):
+    calls = []
+
+    def fake(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"ok": True, "revision": "r", "ids": []}
+
+    monkeypatch.setattr(server, name, fake)
+    return calls
+
+
+def test_update_item_accepts_a_list_item_or_content_item(monkeypatch):
+    calls = _record(monkeypatch, "_update_item_com")
+    _call("update_item", {"page_id": "p", "item_id": "i", "item": {"text": "list item text"}})
+    _call("update_item", {"page_id": "p", "item_id": "i", "item": {"type": "paragraph", "text": "para"},
+                          "expected_revision": "r1"})
+    (first, _), (second, second_kw) = calls
+    assert type(first[2]).__name__ == "ListItem" and type(second[2]).__name__ == "Paragraph"
+    assert second_kw["expected_revision"] == "r1"
+
+
+def test_insert_items_passes_anchor(monkeypatch):
+    calls = _record(monkeypatch, "_insert_items_com")
+    _call("insert_items", {"page_id": "p", "items": [{"type": "paragraph", "text": "x"}], "outline_id": "o", "at_end": False})
+    ((args, kwargs),) = calls
+    assert args[0] == "p" and kwargs["outline_id"] == "o" and kwargs["at_end"] is False
+
+
+def test_delete_and_move_tools(monkeypatch):
+    deletes = _record(monkeypatch, "_delete_items_com")
+    moves = _record(monkeypatch, "_move_item_com")
+    _call("delete_items", {"page_id": "p", "item_ids": ["a", "b"]})
+    _call("move_item", {"page_id": "p", "item_id": "a", "under_id": "b"})
+    assert deletes[0][0][:2] == ("p", ["a", "b"])
+    assert moves[0][0][:2] == ("p", "a") and moves[0][1]["under_id"] == "b"
+
+
+def test_every_tool_has_a_description():
+    tools = asyncio.run(server.create_server(raw_xml_tools=True).list_tools())
+    assert [tool.name for tool in tools if not (tool.description or "").strip()] == []

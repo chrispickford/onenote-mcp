@@ -172,6 +172,20 @@ pick a page → read/write tools below.
 | `list_backups` | List the local page backups taken before writes, newest first, optionally for one page or section or since a time. |
 | `restore_page` | Write a backup back over its page, or as a new page in a given section when the original is gone. |
 
+### Targeted edits
+
+These change single items by the `id` `get_page` reports, without rewriting the page:
+only the outline holding the item is re-sent, and every other item keeps its id. They
+back the page up first. An outline that holds handwriting or recordings cannot be
+edited this way (re-sending it would lose them); attachments and images are kept.
+
+| Tool | What it does |
+| --- | --- |
+| `update_item` | Replace one item with new content (any item type, or a plain list item to keep the list style). Needs a prior `get_page`. |
+| `insert_items` | Insert items before or after an item, or at the start or end of an outline. Needs no prior read. |
+| `delete_items` | Delete items with the content indented under them; an emptied outline is removed. Needs a prior `get_page`. |
+| `move_item` | Move an item next to another or under it as its last child. Needs a prior `get_page`. |
+
 ### Health
 
 | Tool | What it does |

@@ -51,7 +51,7 @@ import comtypes
 import comtypes.client
 import comtypes.typeinfo
 
-from onenote_mcp import backups, config, hierarchy, pagestate
+from onenote_mcp import backups, config, edits, hierarchy, pagestate
 from onenote_mcp.builders import UNSUPPORTED_PAGE_OBJECT_TAGS, protected_items
 from onenote_mcp.images import pixel_size
 from onenote_mcp.paths import check_insert_path
@@ -1177,3 +1177,101 @@ def restore_page(backup_id: str, target_section_id: str | None = None) -> dict:
         )
     except comtypes.COMError as exc:
         raise OneNoteError(f"restore_page failed (backup {backup_id!r}): hresult={exc.hresult:#010x}") from exc
+
+
+# ---- Targeted edits ------------------------------------------------------------
+
+def _oe_ids(page_xml: str) -> list[str]:
+    root = ET.fromstring(page_xml)
+    return [
+        oe.get("objectID") for outline in root.findall(f"{{{_ONE_NS}}}Outline")
+        for oe in outline.iter(f"{{{_ONE_NS}}}OE") if oe.get("objectID")
+    ]
+
+
+def _edit_page_impl(page_id: str, tool: str, operation, args: tuple, expected_revision: str | None) -> dict:
+    """Run edits.<operation> on the page and write the outlines it changed.
+
+    Reads with binary data (re-sent images need their bytes), checks the
+    revision, refuses new files outside ONENOTE_FILE_ROOTS, backs the page up,
+    then sends the changed outlines in one UpdatePageContent and deletes the
+    outlines the edit emptied.  Returns {"ok", "revision", "ids"} where ids are
+    the objectIDs of OEs that are new on the page.
+    """
+    app = _app()
+    _ensure_allowed(app, page_id, "Page")
+    current_xml = app.GetPageContent(page_id, 0)
+    pagestate.check(page_id, current_xml, expected_revision)
+    page_root = ET.fromstring(app.GetPageContent(page_id, 1))
+    edit = operation(page_root, *args)
+    for new_oe in edit.new_oes:
+        _check_insert_paths(ET.tostring(new_oe, encoding="unicode"))
+    _backup(app, page_id, tool)
+    if edit.outlines:
+        xml = edits.edit_xml(page_id, page_root, edit)
+        app.UpdatePageContent(_complete_image_sizes(_resolve_mcpref_to_data(xml, app)), 0.0)
+    failures = _delete_page_objects(
+        app, page_id, [ET.Element("Outline", {"objectID": object_id}) for object_id in edit.delete_outline_ids],
+    )
+    after_xml = app.GetPageContent(page_id, 0)
+    pagestate.after_write(page_id, before_xml=current_xml, after_xml=after_xml, checked=expected_revision is not None)
+    if failures:
+        raise _partial_write_error(failures)
+    before = set(_oe_ids(current_xml))
+    return {
+        "ok": True,
+        "revision": pagestate.remembered(page_id),
+        "ids": [object_id for object_id in _oe_ids(after_xml) if object_id not in before],
+    }
+
+
+def _edit(page_id: str, tool: str, operation, args: tuple, expected_revision: str | None, *, required: bool) -> dict:
+    expected = pagestate.expected(page_id, expected_revision, required=required)
+    try:
+        return _run_com(
+            _edit_page_impl, page_id, tool, operation, args, expected,
+            timeout=WRITE_TIMEOUT, write_page_id=page_id,
+        )
+    except comtypes.COMError as exc:
+        raise OneNoteError(f"{tool} failed (page {page_id!r}): hresult={exc.hresult:#010x}") from exc
+
+
+def update_item(page_id: str, item_id: str, item, expected_revision: str | None = None) -> dict:
+    """Replace one item; the page must be read first (or expected_revision given)."""
+    return _edit(page_id, "update_item", edits.update_item, (item_id, item), expected_revision, required=True)
+
+
+def insert_items(
+    page_id: str,
+    items: list,
+    before_id: str | None = None,
+    after_id: str | None = None,
+    outline_id: str | None = None,
+    at_end: bool = True,
+    expected_revision: str | None = None,
+) -> dict:
+    """Insert items next to an item or into an outline; needs no prior read."""
+    return _edit(
+        page_id, "insert_items", edits.insert_items, (items, before_id, after_id, outline_id, at_end),
+        expected_revision, required=False,
+    )
+
+
+def delete_items(page_id: str, item_ids: list[str], expected_revision: str | None = None) -> dict:
+    """Delete items; the page must be read first (or expected_revision given)."""
+    return _edit(page_id, "delete_items", edits.delete_items, (item_ids,), expected_revision, required=True)
+
+
+def move_item(
+    page_id: str,
+    item_id: str,
+    before_id: str | None = None,
+    after_id: str | None = None,
+    under_id: str | None = None,
+    expected_revision: str | None = None,
+) -> dict:
+    """Move one item; the page must be read first (or expected_revision given)."""
+    return _edit(
+        page_id, "move_item", edits.move_item, (item_id, before_id, after_id, under_id),
+        expected_revision, required=True,
+    )

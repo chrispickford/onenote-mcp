@@ -1465,3 +1465,47 @@ def parse_page(xml: str) -> PageContent:
         title=title, outlines=outlines, images=images, unsupported=unsupported,
         last_modified=root.get("lastModifiedTime"),
     )
+
+
+# ---- Building blocks for targeted edits (edits.py) ---------------------------
+
+def build_item_elements(
+    items: list[ListChild], list_style: str = "bullet",
+) -> tuple[list[ET.Element], dict[int, str]]:
+    """Return the OEs for *items* and the CDATA map apply_cdata needs after serialising.
+
+    A ListItem becomes a list OE in *list_style* ('bullet' or 'numbered');
+    every other item is built as in a whole-page write.  Heading OEs carry
+    the local quickStyleIndex of HEADING_QUICK_STYLE_INDEX, tags the local
+    index of TAG_LOCAL_INDEX; edits.py remaps both to the page's tables.
+    """
+    cdata_map: dict[int, str] = {}
+    cdata_counter = [0]
+    oes: list[ET.Element] = []
+    for item in items:
+        if isinstance(item, ListItem):
+            oes.extend(_list_items_to_oes([item], list_style, cdata_map, cdata_counter))
+        else:
+            oes.extend(_item_to_oes(item, cdata_map, cdata_counter))
+    return oes, cdata_map
+
+
+def apply_cdata(xml_str: str, cdata_map: dict[int, str]) -> str:
+    """Put the CDATA sections back into XML serialised from build_item_elements OEs."""
+    return _apply_cdata(xml_str, cdata_map)
+
+
+HEADING_QUICK_STYLE_INDEX = _HEADING_QUICK_STYLE_INDEX
+TAG_LOCAL_INDEX = _TAG_LOCAL_INDEX
+quick_style_def_el = _quick_style_def_el
+
+
+def tag_symbol(kind: str) -> str:
+    return _TAG_DEFS[kind][1]
+
+
+def oe_content_kind(oe_el: ET.Element) -> str | None:
+    """Return the kind ('ink', 'file', 'media', 'unknown') of content in *oe_el* the
+    structured tools cannot write, or None."""
+    content = _unsupported_content(oe_el)
+    return _UNSUPPORTED_KINDS[content.tag] if content is not None else None

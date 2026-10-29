@@ -47,8 +47,12 @@ from onenote_mcp.com import (
     append_page as _append_page_com,
     list_backups as _list_backups_com,
     restore_page as _restore_page_com,
+    update_item as _update_item_com,
+    insert_items as _insert_items_com,
+    delete_items as _delete_items_com,
+    move_item as _move_item_com,
 )
-from onenote_mcp.models import FloatingImage, Outline, PageContent
+from onenote_mcp.models import FloatingImage, ListChild, Outline, PageContent
 from onenote_mcp.builders import (
     UNSUPPORTED_PAGE_OBJECT_TAGS,
     build_page_xml, build_append_xml, parse_section_pages, parse_page,
@@ -578,6 +582,128 @@ async def append_page(page_id: str, outline: Outline, expected_revision: str | N
         page_xml = build_append_xml(outline)
         await asyncio.to_thread(_append_page_com, page_id, page_xml, expected_revision=expected_revision)
         return "ok"
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def update_item(
+    page_id: str,
+    item_id: str,
+    item: ListChild,
+    expected_revision: str | None = None,
+) -> dict:
+    """Replace one item on a page with new content, leaving everything else unchanged.
+
+    page_id: the page. item_id: the "id" of a paragraph, list item, image, table or
+    attachment from get_page. item: the new content, in the replace_page item schema
+    (paragraph, list, table, inline_image, image_placeholder, attachment), or a plain
+    list item ({"text": ..., "tag": ...} without "type") to replace a list item while
+    keeping its list style. Include "children" to keep content indented under it: the
+    item's children are replaced too. A single new item keeps item_id.
+    Attachments and other read-only items cannot be changed, only moved or deleted.
+    expected_revision: as in replace_page; the page must have been read with get_page.
+
+    Targeted edits change only the outline holding the item: the rest of the page,
+    and every other item's id, stay as they are. The page is backed up first (see
+    list_backups). An outline that holds handwriting or recordings cannot be edited this
+    way (it would lose them); attachments are kept.
+
+    Returns {"ok": true, "revision": "<new revision or null>", "ids": [objectIDs of
+    the items that are new on the page]}.
+    """
+    try:
+        return await asyncio.to_thread(_update_item_com, page_id, item_id, item, expected_revision=expected_revision)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def insert_items(
+    page_id: str,
+    items: list[ListChild],
+    before_id: str | None = None,
+    after_id: str | None = None,
+    outline_id: str | None = None,
+    at_end: bool = True,
+    expected_revision: str | None = None,
+) -> dict:
+    """Insert new items into a page without rewriting it.
+
+    Give exactly one anchor: before_id or after_id (an item "id" from get_page; the new
+    items go at the same indentation level), or outline_id (an outline "id"; at_end
+    true appends, false prepends). items use the replace_page item schema; plain list
+    items ({"text": ...} without "type") take the list style of the anchor item.
+    Needs no prior read; expected_revision is optional.
+
+    Targeted edits change only the outline holding the item: the rest of the page,
+    and every other item's id, stay as they are. The page is backed up first (see
+    list_backups). An outline that holds handwriting or recordings cannot be edited this
+    way (it would lose them); attachments are kept.
+
+    Returns {"ok": true, "revision": "<new revision or null>", "ids": [objectIDs of
+    the items that are new on the page]}.
+    """
+    try:
+        return await asyncio.to_thread(
+            _insert_items_com, page_id, items, before_id=before_id, after_id=after_id,
+            outline_id=outline_id, at_end=at_end, expected_revision=expected_revision,
+        )
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def delete_items(page_id: str, item_ids: list[str], expected_revision: str | None = None) -> dict:
+    """Delete items (with the content indented under them) from a page.
+
+    item_ids: "id"s from get_page. An outline left without items is deleted.
+    Attachments and other read-only items can be deleted this way.
+    expected_revision: as in replace_page; the page must have been read with get_page.
+
+    Targeted edits change only the outline holding the item: the rest of the page,
+    and every other item's id, stay as they are. The page is backed up first (see
+    list_backups). An outline that holds handwriting or recordings cannot be edited this
+    way (it would lose them); attachments are kept.
+
+    Returns {"ok": true, "revision": "<new revision or null>", "ids": [objectIDs of
+    the items that are new on the page]}.
+    """
+    try:
+        return await asyncio.to_thread(_delete_items_com, page_id, item_ids, expected_revision=expected_revision)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def move_item(
+    page_id: str,
+    item_id: str,
+    before_id: str | None = None,
+    after_id: str | None = None,
+    under_id: str | None = None,
+    expected_revision: str | None = None,
+) -> dict:
+    """Move one item (with the content indented under it) within a page.
+
+    Give exactly one target: before_id or after_id (next to that item, at its
+    indentation level) or under_id (as the last item indented under it). Within the
+    same outline the item keeps its id; moved into another outline it gets a new one.
+    expected_revision: as in replace_page; the page must have been read with get_page.
+
+    Targeted edits change only the outline holding the item: the rest of the page,
+    and every other item's id, stay as they are. The page is backed up first (see
+    list_backups). An outline that holds handwriting or recordings cannot be edited this
+    way (it would lose them); attachments are kept.
+
+    Returns {"ok": true, "revision": "<new revision or null>", "ids": [objectIDs of
+    the items that are new on the page]}.
+    """
+    try:
+        return await asyncio.to_thread(
+            _move_item_com, page_id, item_id, before_id=before_id, after_id=after_id,
+            under_id=under_id, expected_revision=expected_revision,
+        )
     except (OneNoteError, ValueError) as exc:
         raise _fail(exc) from exc
 

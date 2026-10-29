@@ -503,3 +503,103 @@ def test_replace_with_path_and_no_roots_is_refused(monkeypatch, allowed_file, cl
         com.replace_page("{PAGE}", page, expected_revision="r")
     assert "Inserting files is disabled" in str(exc.value)
     assert fake.calls == []
+
+
+# ---------------------------------------------------------------------------
+# targeted edits
+# ---------------------------------------------------------------------------
+
+_EDIT_PAGE = (
+    f'<one:Page {_XMLNS} ID="{{PAGE}}">'
+    '<one:Title objectID="title"><one:OE objectID="t"><one:T>Old</one:T></one:OE></one:Title>'
+    '<one:Outline objectID="o1"><one:OEChildren>'
+    '<one:OE objectID="a"><one:T>alpha</one:T></one:OE><one:OE objectID="b"><one:T>beta</one:T></one:OE>'
+    '</one:OEChildren></one:Outline></one:Page>'
+)
+
+
+class _FakeEditApp(_FakeReplaceApp):
+    def __init__(self) -> None:
+        super().__init__()
+        self.page = _EDIT_PAGE
+        self.reads: list[int] = []
+
+    def GetPageContent(self, page_id: str, page_info: int) -> str:
+        self.reads.append(page_info)
+        return self.page
+
+
+def test_edit_backs_up_and_checks_expected(monkeypatch, clean_pagestate, _backup_dir):
+    from onenote_mcp.models import Paragraph
+    fake = _FakeEditApp()
+    _use(monkeypatch, fake)
+    with pytest.raises(OneNoteError) as exc:
+        com.update_item("{PAGE}", "b", Paragraph(type="paragraph", text="x"), expected_revision="0000000000000000")
+    assert exc.value.code == "conflict" and fake.calls == []
+
+    com.update_item("{PAGE}", "b", Paragraph(type="paragraph", text="beta 2"),
+                    expected_revision=pagestate.revision(_EDIT_PAGE))
+    (call, xml), = fake.calls
+    assert call == "update"
+    sent = ET.fromstring(xml)
+    assert [t.text for t in sent.iter(f"{{{_ONE_NS}}}T")] == ["alpha", "beta 2"]
+    assert 1 in fake.reads, "edits read the page with binary data so images can be re-sent"
+    (meta,) = backups.list_backups(_backup_dir, page_id="{PAGE}")
+    assert meta["tool"] == "update_item"
+
+
+def test_update_and_delete_need_a_read_but_insert_does_not(monkeypatch, clean_pagestate):
+    from onenote_mcp.models import Paragraph
+    fake = _FakeEditApp()
+    _use(monkeypatch, fake)
+    for call in (lambda: com.update_item("{PAGE}", "b", Paragraph(type="paragraph", text="x")),
+                 lambda: com.delete_items("{PAGE}", ["b"]),
+                 lambda: com.move_item("{PAGE}", "b", before_id="a")):
+        with pytest.raises(OneNoteError) as exc:
+            call()
+        assert exc.value.code == "bad_request" and "Read the page with get_page first" in str(exc.value)
+    com.insert_items("{PAGE}", [Paragraph(type="paragraph", text="new")], after_id="b")
+    assert [call for call, _ in fake.calls] == ["update"]
+
+
+def test_delete_last_item_deletes_its_outline(monkeypatch, clean_pagestate):
+    fake = _FakeEditApp()
+    _use(monkeypatch, fake)
+    com.delete_items("{PAGE}", ["a", "b"], expected_revision=pagestate.revision(_EDIT_PAGE))
+    assert fake.calls == [("delete", "o1")]
+
+
+def test_edit_reports_new_ids(monkeypatch, clean_pagestate):
+    from onenote_mcp.models import Paragraph
+    fake = _FakeEditApp()
+    _use(monkeypatch, fake)
+    original_update = fake.UpdatePageContent
+
+    def update(xml, date):
+        original_update(xml, date)
+        fake.page = _EDIT_PAGE.replace('<one:OE objectID="b">', '<one:OE objectID="n1"><one:T>new</one:T></one:OE><one:OE objectID="b">')
+
+    fake.UpdatePageContent = update
+    result = com.insert_items("{PAGE}", [Paragraph(type="paragraph", text="new")], before_id="b")
+    assert result["ids"] == ["n1"]
+
+
+def test_edit_with_new_file_outside_roots_refused(monkeypatch, clean_pagestate, tmp_path):
+    from onenote_mcp.models import Attachment
+    monkeypatch.setenv("ONENOTE_FILE_ROOTS", str(tmp_path / "roots"))
+    outside = tmp_path / "x.txt"
+    outside.write_text("x")
+    fake = _FakeEditApp()
+    _use(monkeypatch, fake)
+    with pytest.raises(OneNoteError, match="outside ONENOTE_FILE_ROOTS"):
+        com.insert_items("{PAGE}", [Attachment(type="attachment", path=str(outside))], after_id="b")
+    assert fake.calls == []
+
+
+def test_edits_register_as_writes_to_their_page(monkeypatch):
+    from onenote_mcp.models import Paragraph
+    seen = []
+    monkeypatch.setattr(com, "_run_com", lambda fn, *args, **kwargs: seen.append(kwargs.get("write_page_id")))
+    com.insert_items("{PAGE}", [Paragraph(type="paragraph", text="x")], after_id="a")
+    com.update_item("{PAGE}", "a", Paragraph(type="paragraph", text="x"), expected_revision="r")
+    assert seen == ["{PAGE}", "{PAGE}"]
