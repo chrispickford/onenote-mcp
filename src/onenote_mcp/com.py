@@ -183,10 +183,42 @@ class OneNoteError(Exception):
 
 # ---- Internal helpers -------------------------------------------------------
 
+# XMLSchema enum value for the 2013 schema, the namespace every parser and
+# builder here uses.  Newer OneNote builds answer in a newer namespace by
+# default (e.g. .../2026/onenote), so each XML-exchanging call pins it.
+XS_2013 = 2
+
+
+class _SchemaPinnedApp:
+    """Wrap OneNote.Application so XML calls always use the 2013 schema.
+
+    Appends XS_2013 as the xsSchema argument of GetHierarchy, GetPageContent,
+    UpdatePageContent and UpdateHierarchy; every other attribute passes through.
+    """
+
+    def __init__(self, app) -> None:
+        self._app = app
+
+    def GetHierarchy(self, start_node_id, scope):
+        return self._app.GetHierarchy(start_node_id, scope, XS_2013)
+
+    def GetPageContent(self, page_id, page_info):
+        return self._app.GetPageContent(page_id, page_info, XS_2013)
+
+    def UpdatePageContent(self, xml, date_expected_last_modified):
+        return self._app.UpdatePageContent(xml, date_expected_last_modified, XS_2013)
+
+    def UpdateHierarchy(self, xml):
+        return self._app.UpdateHierarchy(xml, XS_2013)
+
+    def __getattr__(self, name):
+        return getattr(self._app, name)
+
+
 def _app():
-    """Return a typed OneNote.Application COM object."""
+    """Return a typed OneNote.Application COM object pinned to the 2013 schema."""
     mod = _ensure_module()
-    return comtypes.client.CreateObject(mod.Application)
+    return _SchemaPinnedApp(comtypes.client.CreateObject(mod.Application))
 
 
 def _run_com(fn, *args, timeout=READ_TIMEOUT):
