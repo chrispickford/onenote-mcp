@@ -12,7 +12,7 @@ from tests.png import png_base64 as _png_base64
 
 try:
     import comtypes
-    from onenote_mcp import com
+    from onenote_mcp import com, pagestate
     from onenote_mcp.builders import UNSUPPORTED_PAGE_OBJECT_TAGS
     from onenote_mcp.com import OneNoteError, _complete_image_sizes
     _COM_AVAILABLE = True
@@ -67,6 +67,9 @@ class _FakeApp:
 
     def __init__(self) -> None:
         self.updates: list[str] = []
+
+    def GetPageContent(self, page_id: str, page_info: int) -> str:
+        return f'<one:Page {_XMLNS} ID="{page_id}"/>'
 
     def UpdatePageContent(self, xml: str, date_expected_last_modified: float) -> None:
         self.updates.append(xml)
@@ -201,7 +204,82 @@ def test_public_replace_page_passes_the_partial_write_through(monkeypatch):
     fake = _FakeReplaceApp(undeletable=frozenset({"outline-2"}))
     _use(monkeypatch, fake)
     with pytest.raises(OneNoteError) as exc:
-        com.replace_page("{PAGE}", _NEW_PAGE)
+        com.replace_page("{PAGE}", _NEW_PAGE, expected_revision=pagestate.revision(_CURRENT_PAGE))
 
     assert exc.value.code == "partial_write"
     assert "Outline outline-2" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# revisions: writes refuse pages changed since they were read
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def clean_pagestate():
+    pagestate.forget_all()
+    yield
+    pagestate.forget_all()
+
+
+def test_replace_with_stale_revision_is_conflict_and_writes_nothing(monkeypatch, clean_pagestate):
+    fake = _FakeReplaceApp()
+    _use(monkeypatch, fake)
+    with pytest.raises(OneNoteError) as exc:
+        com._replace_page_impl("{PAGE}", _NEW_PAGE, frozenset(), "0000000000000000")
+    assert exc.value.code == "conflict"
+    assert fake.calls == []
+
+
+def test_replace_with_matching_revision_writes(monkeypatch, clean_pagestate):
+    fake = _FakeReplaceApp()
+    _use(monkeypatch, fake)
+    com._replace_page_impl("{PAGE}", _NEW_PAGE, frozenset(), pagestate.revision(_CURRENT_PAGE))
+    assert ("update" in [call for call, _ in fake.calls])
+
+
+def test_replace_remembers_the_revision_after_writing(monkeypatch, clean_pagestate):
+    fake = _FakeReplaceApp()
+    _use(monkeypatch, fake)
+    com._replace_page_impl("{PAGE}", _NEW_PAGE, frozenset(), pagestate.revision(_CURRENT_PAGE))
+    assert pagestate.remembered("{PAGE}") == pagestate.revision(_CURRENT_PAGE)
+
+
+def test_public_replace_without_a_read_is_bad_request_before_com(monkeypatch, clean_pagestate):
+    fake = _FakeReplaceApp()
+    _use(monkeypatch, fake)
+    with pytest.raises(OneNoteError) as exc:
+        com.replace_page("{PAGE}", _NEW_PAGE)
+    assert exc.value.code == "bad_request"
+    assert fake.calls == []
+
+
+def test_public_replace_uses_the_remembered_revision(monkeypatch, clean_pagestate):
+    fake = _FakeReplaceApp()
+    _use(monkeypatch, fake)
+    pagestate.remember("{PAGE}", "0000000000000000")
+    with pytest.raises(OneNoteError) as exc:
+        com.replace_page("{PAGE}", _NEW_PAGE)
+    assert exc.value.code == "conflict"
+
+
+def test_get_page_remembers_the_revision(monkeypatch, clean_pagestate):
+    fake = _FakeReplaceApp()
+    _use(monkeypatch, fake)
+    com.get_page("{PAGE}")
+    assert pagestate.remembered("{PAGE}") == pagestate.revision(_CURRENT_PAGE)
+
+
+def test_append_needs_no_read(monkeypatch, clean_pagestate):
+    fake = _FakeReplaceApp()
+    _use(monkeypatch, fake)
+    com.append_page("{PAGE}", f'<one:Outline {_XMLNS}><one:OEChildren><one:OE><one:T>x</one:T></one:OE></one:OEChildren></one:Outline>')
+    assert [call for call, _ in fake.calls] == ["update"]
+    assert pagestate.remembered("{PAGE}") is None
+
+
+def test_append_with_stale_given_revision_is_conflict(monkeypatch, clean_pagestate):
+    fake = _FakeReplaceApp()
+    _use(monkeypatch, fake)
+    with pytest.raises(OneNoteError) as exc:
+        com.append_page("{PAGE}", f'<one:Outline {_XMLNS}><one:OEChildren/></one:Outline>', "0000000000000000")
+    assert exc.value.code == "conflict"

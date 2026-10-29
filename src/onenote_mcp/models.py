@@ -252,5 +252,16 @@ class PageContent(BaseModel):
             "position, so place new content where it does not overlap them."
         ),
     )
+    revision: str | None = Field(
+        None,
+        description=(
+            "Read-only: a token for the page content as read. Writes that change or remove "
+            "existing content are refused with 'conflict' if the page no longer has it; pass "
+            "it as expected_revision, or rely on the server remembering the last read."
+        ),
+    )
+    last_modified: str | None = Field(
+        None, description="Read-only: the page's lastModifiedTime as OneNote reports it (UTC, ISO 8601).",
+    )
 
 

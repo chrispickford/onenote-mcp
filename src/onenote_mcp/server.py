@@ -30,7 +30,7 @@ from collections.abc import Callable
 
 from mcp.server.fastmcp import FastMCP
 
-from onenote_mcp import config
+from onenote_mcp import config, pagestate
 from onenote_mcp.com import (
     OneNoteError,
     allowlist_config_error as _allowlist_config_error_com,
@@ -298,10 +298,17 @@ async def get_page(page_id: str, include_binary: bool = False) -> dict:
     The returned structure is directly compatible with replace_page — you can read a
     page, modify its outlines, and pass outlines + images straight to replace_page.
     Unsupported content is the exception, see above.
+
+    REVISION: "revision" identifies the content as read. replace_page refuses with
+    'conflict' if the page changed since (e.g. the user edited it in OneNote);
+    re-read and retry then. The server remembers the last read revision per page,
+    so passing it back as expected_revision is optional.
     """
     try:
         xml = await asyncio.to_thread(_get_page_com, page_id, include_binary)
-        return parse_page(xml).model_dump(exclude_defaults=True)
+        content = parse_page(xml)
+        content.revision = pagestate.remembered(page_id)
+        return content.model_dump(exclude_defaults=True)
     except (OneNoteError, ValueError) as exc:
         raise _fail(exc) from exc
 
@@ -349,13 +356,16 @@ async def create_page(section_id: str, title: str, parent_page_id: str | None = 
 
 
 @_tool(raw_xml=True)
-async def replace_page_xml(page_id: str, page_xml: str) -> str:
+async def replace_page_xml(page_id: str, page_xml: str, expected_revision: str | None = None) -> str:
     """Advanced / escape-hatch only. Prefer replace_page (typed slim tool) unless you
     need direct XML control or are debugging a OneNote schema issue.
 
     Replace the full content of a OneNote page.
 
     page_id: ID attribute of the target page (from list_pages or create_page).
+    expected_revision: optional. The page must still have this revision (from get_page),
+              else 'conflict'. Omitted: the revision of this session's last get_page of
+              the page is used; a page never read is refused with bad_request.
     page_xml: a COMPLETE <one:Page> document — not a fragment. The ID attribute
               on the root element is overwritten automatically to match page_id.
 
@@ -404,20 +414,22 @@ async def replace_page_xml(page_id: str, page_xml: str) -> str:
     content sits.
     """
     try:
-        await asyncio.to_thread(_replace_page_com, page_id, page_xml)
+        await asyncio.to_thread(_replace_page_com, page_id, page_xml, expected_revision=expected_revision)
         return "ok"
     except OneNoteError as exc:
         raise _fail(exc) from exc
 
 
 @_tool(raw_xml=True)
-async def append_page_xml(page_id: str, content_xml: str) -> str:
+async def append_page_xml(page_id: str, content_xml: str, expected_revision: str | None = None) -> str:
     """Advanced / escape-hatch only. Prefer append_page (typed slim tool) unless you
     need direct XML control or are debugging a OneNote schema issue.
 
     Append a single content element to an existing OneNote page.
 
     page_id: ID attribute of the target page (from list_pages or create_page).
+    expected_revision: optional. When given, the page must still have this revision
+              (from get_page), else 'conflict'. Appending needs no prior read.
     content_xml: a SINGLE formally correct OneNote XML element — NOT a full
                  <one:Page> document. The xmlns:one declaration MUST appear on
                  the element itself.
@@ -441,19 +453,28 @@ async def append_page_xml(page_id: str, content_xml: str) -> str:
     Returns "ok" on success.
     """
     try:
-        await asyncio.to_thread(_append_page_com, page_id, content_xml)
+        await asyncio.to_thread(_append_page_com, page_id, content_xml, expected_revision=expected_revision)
         return "ok"
     except OneNoteError as exc:
         raise _fail(exc) from exc
 
 
 @_tool()
-async def replace_page(page_id: str, title: str, outlines: list[Outline], images: list[FloatingImage] | None = None) -> str:
+async def replace_page(
+    page_id: str,
+    title: str,
+    outlines: list[Outline],
+    images: list[FloatingImage] | None = None,
+    expected_revision: str | None = None,
+) -> str:
     """Replace the full content of a OneNote page using structured typed content.
 
     Prefer this over replace_page_xml unless you need direct XML control.
 
     page_id: the page ID from list_pages or create_page.
+    expected_revision: optional. The page must still have this revision (from get_page),
+              else 'conflict'. Omitted: the revision of this session's last get_page of
+              the page is used; a page never read is refused with bad_request.
     title:   new page title — required and replaces the existing title.
     outlines: list of Outline objects that define the page canvas layout.
               Each Outline is an independently positioned block. Items within
@@ -491,19 +512,24 @@ async def replace_page(page_id: str, title: str, outlines: list[Outline], images
     """
     try:
         page_xml = build_page_xml(title, outlines, images)
-        await asyncio.to_thread(_replace_page_com, page_id, page_xml, UNSUPPORTED_PAGE_OBJECT_TAGS)
+        await asyncio.to_thread(
+            _replace_page_com, page_id, page_xml, UNSUPPORTED_PAGE_OBJECT_TAGS,
+            expected_revision=expected_revision,
+        )
         return "ok"
     except (OneNoteError, ValueError) as exc:
         raise _fail(exc) from exc
 
 
 @_tool()
-async def append_page(page_id: str, outline: Outline) -> str:
+async def append_page(page_id: str, outline: Outline, expected_revision: str | None = None) -> str:
     """Append a structured content block to an existing OneNote page.
 
     Prefer this over append_page_xml unless you need direct XML control.
 
     page_id: the page ID from list_pages or create_page.
+    expected_revision: optional. When given, the page must still have this revision
+              (from get_page), else 'conflict'. Appending needs no prior read.
     outline: a single Outline object containing the content to append.
              Existing page content is preserved.
              Outline items may be paragraph, list, image, or image_placeholder
@@ -515,7 +541,7 @@ async def append_page(page_id: str, outline: Outline) -> str:
     """
     try:
         page_xml = build_append_xml(outline)
-        await asyncio.to_thread(_append_page_com, page_id, page_xml)
+        await asyncio.to_thread(_append_page_com, page_id, page_xml, expected_revision=expected_revision)
         return "ok"
     except (OneNoteError, ValueError) as exc:
         raise _fail(exc) from exc

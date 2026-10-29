@@ -190,6 +190,18 @@ register them.
 | `replace_page_xml` | Replace a page from a caller-supplied `<one:Page>` document. |
 | `append_page_xml` | Append a single raw XML element (e.g. `<one:Outline>`) to a page. |
 
+## Page revisions
+
+`get_page` returns a `revision` token for the content it read. Writes that change or
+remove existing content (`replace_page`, `replace_page_xml`) only run if the page still
+has that revision; otherwise they fail with `conflict` and change nothing, so edits made
+in OneNote since the read are never overwritten. The server remembers the revision of
+the last read (or creation) of each page, so passing `expected_revision` is optional.
+A page the server has neither read nor created is refused with `bad_request` until it is
+read. Appending needs no prior read.
+
+OneNote's own last-modified check is not used: it accepted stale writes in testing.
+
 ## Image handles (`mcpref:`)
 
 Reading a page never ships image bytes to the client. Each image is represented
@@ -235,6 +247,7 @@ Tool errors start with a machine-readable code so clients can react without pars
 | `backend_error` | OneNote returned a COM failure (bad id, locked content, …). |
 | `bad_request` | The request itself was invalid (unknown image handle, malformed content, …). |
 | `config_error` | The server's configuration is invalid, e.g. `ONENOTE_ALLOWED_NOTEBOOKS` still contains an unexpanded `${...}` placeholder. Fix the MCP client config and restart; `ping` shows the message. |
+| `conflict` | The page changed since it was read (for example the user edited it in OneNote), so the write was refused and nothing was changed. Re-read the page with `get_page` and retry. |
 | `partial_write` | A replace wrote the new content, but some old page objects could not be deleted and are still on the page. The message lists each one's kind, object id and hresult. Read the page with `get_page` and decide how to handle them instead of retrying the replace. |
 
 ## Configuration

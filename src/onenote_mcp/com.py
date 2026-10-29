@@ -51,6 +51,7 @@ import comtypes
 import comtypes.client
 import comtypes.typeinfo
 
+from onenote_mcp import pagestate
 from onenote_mcp.images import pixel_size
 
 _ONE_NS = "http://schemas.microsoft.com/office/onenote/2013/onenote"
@@ -154,31 +155,8 @@ def _ensure_module():
     return _onenote_mod
 
 
-# ---- Error type -------------------------------------------------------------
-
-class OneNoteError(Exception):
-    """Raised when a OneNote COM call fails.
-
-    Carries a machine-readable ``code`` so callers (and the model) can tell a
-    transient timeout apart from a hard backend error without parsing prose:
-
-      timeout        OneNote did not respond within the per-operation deadline.
-      backend_error  OneNote returned a COM failure (bad id, locked content, …).
-      bad_request    The request itself was malformed (e.g. unknown handle).
-      config_error   The server's environment configuration is invalid.
-      partial_write  A replace wrote the new content, but old page objects it
-                     could not delete are still on the page (listed in the
-                     message).
-    """
-
-    def __init__(self, message: str, code: str = "backend_error") -> None:
-        super().__init__(message)
-        self.code = code
-
-    def __str__(self) -> str:
-        # Prefix the code so it survives transport as plain error text, e.g.
-        # "timeout: OneNote did not respond within 20s …".
-        return f"{self.code}: {super().__str__()}"
+# The error type lives in errors.py so modules com.py imports can raise it too.
+from onenote_mcp.errors import OneNoteError  # noqa: E402  (re-exported)
 
 
 # ---- Internal helpers -------------------------------------------------------
@@ -609,15 +587,18 @@ def _list_pages_impl(section_id: str) -> str:
 
 
 def _get_page_impl(page_id: str, include_binary: bool = False) -> str:
+    """Read a page and remember its revision (always from a basic read, so it
+    compares with the basic read a later write checks against)."""
     app = _app()
     _ensure_allowed(app, page_id, "Page")
+    # pageInfo=0 = piBasic: no binary; images come back as <one:CallbackID>.
+    basic_xml = app.GetPageContent(page_id, 0)
+    pagestate.remember(page_id, pagestate.revision(basic_xml))
     if include_binary:
         # pageInfo=1 = piBinaryData: embeds image bytes as base64 in <one:Data>
         xml = app.GetPageContent(page_id, 1)
         return _strip_data_to_mcpref(xml)
-    # pageInfo=0 = piBasic: no binary; images come back as <one:CallbackID>.
-    xml = app.GetPageContent(page_id, 0)
-    return _strip_callbacks_to_mcpref(xml, page_id)
+    return _strip_callbacks_to_mcpref(basic_xml, page_id)
 
 
 def _get_image_data_impl(handle: str) -> str:
@@ -698,15 +679,22 @@ def _partial_write_error(failures: list[str]) -> OneNoteError:
     )
 
 
-def _replace_page_impl(page_id: str, page_xml: str, keep_tags: frozenset[str]) -> None:
+def _replace_page_impl(
+    page_id: str,
+    page_xml: str,
+    keep_tags: frozenset[str],
+    expected_revision: str | None = None,
+) -> None:
     """Full-replace implementation — runs on the worker thread.
 
-    See replace_page docstring for full semantics.
+    See replace_page docstring for full semantics.  With *expected_revision*
+    the page must still have that revision, else conflict before any write.
     """
     app = _app()
     _ensure_allowed(app, page_id, "Page")
 
     current_xml = app.GetPageContent(page_id, 0)
+    pagestate.check(page_id, current_xml, expected_revision)
     current_root = ET.fromstring(current_xml)
 
     # --- prepare write XML (before any deletion) ---
@@ -740,6 +728,9 @@ def _replace_page_impl(page_id: str, page_xml: str, keep_tags: frozenset[str]) -
     # with part of its old content and none of the new.
     # Pass 0.0 for dateExpectedLastModified (OLE date epoch = no conflict check)
     app.UpdatePageContent(serialized, 0.0)
+    pagestate.after_write(
+        page_id, before_xml=current_xml, after_xml=app.GetPageContent(page_id, 0), checked=True,
+    )
     if failures:
         raise _partial_write_error(failures)
 
@@ -836,12 +827,17 @@ def _create_page_impl(
         # CreateNewPage appends at the end of the section; reorder + indent so the
         # page becomes the LAST sub-page under the requested parent.
         _place_as_subpage(app, section_id, new_page_id, parent_page_id)
+    # The client knows what the page it just created holds, so creating counts
+    # as reading it: a replace may follow without a get_page.
+    pagestate.remember(new_page_id, pagestate.revision(app.GetPageContent(new_page_id, 0)))
     return new_page_id
 
 
-def _append_page_impl(page_id: str, content_xml: str) -> None:
+def _append_page_impl(page_id: str, content_xml: str, expected_revision: str | None = None) -> None:
     app = _app()
     _ensure_allowed(app, page_id, "Page")
+    current_xml = app.GetPageContent(page_id, 0)
+    pagestate.check(page_id, current_xml, expected_revision)
     content_el = ET.fromstring(content_xml)
     for el in content_el.iter():
         el.attrib.pop("objectID", None)
@@ -855,6 +851,10 @@ def _append_page_impl(page_id: str, content_xml: str) -> None:
     serialized = ET.tostring(page_el, encoding="unicode", xml_declaration=False)
     serialized = _complete_image_sizes(_resolve_mcpref_to_data(serialized, app))
     app.UpdatePageContent(serialized, 0.0)
+    pagestate.after_write(
+        page_id, before_xml=current_xml, after_xml=app.GetPageContent(page_id, 0),
+        checked=expected_revision is not None,
+    )
 
 
 # ---- Public API -------------------------------------------------------------
@@ -970,8 +970,16 @@ def create_page(
         ) from exc
 
 
-def replace_page(page_id: str, page_xml: str, keep_tags: frozenset[str] = frozenset()) -> None:
+def replace_page(
+    page_id: str,
+    page_xml: str,
+    keep_tags: frozenset[str] = frozenset(),
+    expected_revision: str | None = None,
+) -> None:
     """Full-replace the page identified by *page_id* with *page_xml*.
+
+    The page must still have *expected_revision*, or the revision remembered
+    from the last get_page; with neither, bad_request before any COM call.
 
     The caller supplies a complete <one:Page> document. The root element's ID
     attribute is overwritten to match *page_id* before calling
@@ -991,16 +999,20 @@ def replace_page(page_id: str, page_xml: str, keep_tags: frozenset[str] = frozen
     then lists the objects that are still on the page.
     """
     _parse_user_xml(page_xml, "page")
+    expected = pagestate.expected(page_id, expected_revision, required=True)
     try:
-        _run_com(_replace_page_impl, page_id, page_xml, keep_tags, timeout=WRITE_TIMEOUT)
+        _run_com(_replace_page_impl, page_id, page_xml, keep_tags, expected, timeout=WRITE_TIMEOUT)
     except comtypes.COMError as exc:
         raise OneNoteError(
             f"replace_page failed (page {page_id!r}): hresult={exc.hresult:#010x}"
         ) from exc
 
 
-def append_page(page_id: str, content_xml: str) -> None:
+def append_page(page_id: str, content_xml: str, expected_revision: str | None = None) -> None:
     """Append a single XML element to the page identified by *page_id*.
+
+    Appending needs no prior read; with *expected_revision* the page must
+    still have that revision.
 
     *content_xml* must be a single, formally correct OneNote XML element
     with the xmlns:one declaration on the element itself, e.g.:
@@ -1020,7 +1032,7 @@ def append_page(page_id: str, content_xml: str) -> None:
     """
     _parse_user_xml(content_xml, "content")
     try:
-        _run_com(_append_page_impl, page_id, content_xml, timeout=WRITE_TIMEOUT)
+        _run_com(_append_page_impl, page_id, content_xml, expected_revision, timeout=WRITE_TIMEOUT)
     except comtypes.COMError as exc:
         raise OneNoteError(
             f"append_page failed (page {page_id!r}): hresult={exc.hresult:#010x}"

@@ -6,6 +6,7 @@ Builds the server in-process the way main() does; no OneNote and no stdio
 transport involved (COM entry points are stubbed where a tool would reach them).
 """
 import asyncio
+import json
 
 import pytest
 
@@ -104,7 +105,7 @@ def test_write_tools_reject_unsupported_items_before_touching_onenote(monkeypatc
 
 def test_only_the_structured_replace_keeps_unsupported_page_objects(monkeypatch):
     calls = []
-    monkeypatch.setattr(server, "_replace_page_com", lambda *args: calls.append(args))
+    monkeypatch.setattr(server, "_replace_page_com", lambda *args, **kwargs: calls.append(args))
     page_xml = '<one:Page xmlns:one="http://schemas.microsoft.com/office/onenote/2013/onenote"/>'
     asyncio.run(server.create_server().call_tool(
         "replace_page", {"page_id": "p", "title": "t", "outlines": []},
@@ -119,7 +120,7 @@ def test_only_the_structured_replace_keeps_unsupported_page_objects(monkeypatch)
 
 def test_replace_page_ignores_the_read_only_outline_height(monkeypatch):
     calls = []
-    monkeypatch.setattr(server, "_replace_page_com", lambda *args: calls.append(args))
+    monkeypatch.setattr(server, "_replace_page_com", lambda *args, **kwargs: calls.append(args))
     read_outline = {"height": 134.27, "items": [{"type": "paragraph", "text": "x"}]}
     asyncio.run(server.create_server().call_tool(
         "replace_page", {"page_id": "p", "title": "t", "outlines": [read_outline]},
@@ -155,3 +156,52 @@ def test_get_page_reports_nested_and_unsupported_content_compactly(monkeypatch):
         ]}],
         "unsupported": [{"kind": "ink", "position": {"x": 1.0, "y": 2.0}}],
     }
+
+
+# ---------------------------------------------------------------------------
+# revisions
+# ---------------------------------------------------------------------------
+
+_ONE_NS = "http://schemas.microsoft.com/office/onenote/2013/onenote"
+
+
+def _call(name, arguments, raw_xml_tools=False):
+    result = asyncio.run(server.create_server(raw_xml_tools=raw_xml_tools).call_tool(name, arguments))
+    return result
+
+
+def test_get_page_returns_revision_and_last_modified(monkeypatch):
+    page_xml = (f'<one:Page xmlns:one="{_ONE_NS}" ID="p" lastModifiedTime="2026-10-29T12:00:00.000Z">'
+                '<one:Title><one:OE><one:T>T</one:T></one:OE></one:Title></one:Page>')
+
+    def fake_get_page(page_id, include_binary=False):
+        server.pagestate.remember(page_id, "abcdef0123456789")
+        return page_xml
+
+    monkeypatch.setattr(server, "_get_page_com", fake_get_page)
+    (content,) = _call("get_page", {"page_id": "p"})
+    structured = json.loads(content.text)
+    assert structured["revision"] == "abcdef0123456789"
+    assert structured["last_modified"] == "2026-10-29T12:00:00.000Z"
+
+
+@pytest.mark.parametrize("tool,arguments,raw", [
+    ("replace_page", {"page_id": "p", "title": "t", "outlines": []}, False),
+    ("replace_page_xml", {"page_id": "p", "page_xml": f'<one:Page xmlns:one="{_ONE_NS}"/>'}, True),
+])
+def test_replace_tools_pass_expected_revision(monkeypatch, tool, arguments, raw):
+    calls = []
+    monkeypatch.setattr(server, "_replace_page_com", lambda *args, **kwargs: calls.append(kwargs))
+    _call(tool, {**arguments, "expected_revision": "r1"}, raw_xml_tools=raw)
+    assert calls[0]["expected_revision"] == "r1"
+
+
+@pytest.mark.parametrize("tool,arguments,raw", [
+    ("append_page", {"page_id": "p", "outline": {"items": []}}, False),
+    ("append_page_xml", {"page_id": "p", "content_xml": f'<one:Outline xmlns:one="{_ONE_NS}"/>'}, True),
+])
+def test_append_tools_pass_expected_revision(monkeypatch, tool, arguments, raw):
+    calls = []
+    monkeypatch.setattr(server, "_append_page_com", lambda *args, **kwargs: calls.append(kwargs))
+    _call(tool, {**arguments, "expected_revision": "r2"}, raw_xml_tools=raw)
+    assert calls[0]["expected_revision"] == "r2"

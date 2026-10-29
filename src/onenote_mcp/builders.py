@@ -1259,4 +1259,7 @@ def parse_page(xml: str) -> PageContent:
         _parse_unsupported_page_object(el) for el in root if el.tag in UNSUPPORTED_PAGE_OBJECT_TAGS
     ]
 
-    return PageContent(title=title, outlines=outlines, images=images, unsupported=unsupported)
+    return PageContent(
+        title=title, outlines=outlines, images=images, unsupported=unsupported,
+        last_modified=root.get("lastModifiedTime"),
+    )
