@@ -448,3 +448,58 @@ def test_page_writes_pass_their_page_as_write_page_id(monkeypatch, call):
     monkeypatch.setattr(com, "_run_com", lambda fn, *args, **kwargs: seen.append(kwargs.get("write_page_id")))
     call()
     assert seen == ["{PAGE}"]
+
+
+# ---------------------------------------------------------------------------
+# file paths in writes must lie inside ONENOTE_FILE_ROOTS
+# ---------------------------------------------------------------------------
+
+def _with_file(tag_xml: str) -> str:
+    return f'<one:Outline {_XMLNS}><one:OEChildren><one:OE>{tag_xml}</one:OE></one:OEChildren></one:Outline>'
+
+
+@pytest.fixture
+def allowed_file(tmp_path, monkeypatch):
+    folder = tmp_path / "roots"
+    folder.mkdir()
+    file = folder / "pic.png"
+    file.write_bytes(b"x")
+    monkeypatch.setenv("ONENOTE_FILE_ROOTS", str(folder))
+    return file
+
+
+@pytest.mark.parametrize("element", [
+    '<one:Image><one:File path="{path}"/></one:Image>',
+    '<one:InsertedFile pathSource="{path}" preferredName="x"/>',
+])
+def test_append_with_path_outside_roots_is_refused_before_com(monkeypatch, allowed_file, tmp_path, element):
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"x")
+    fake = _FakeReplaceApp()
+    _use(monkeypatch, fake)
+    with pytest.raises(OneNoteError) as exc:
+        com.append_page("{PAGE}", _with_file(element.format(path=outside)))
+    assert exc.value.code == "bad_request" and "outside ONENOTE_FILE_ROOTS" in str(exc.value)
+    assert fake.calls == []
+
+
+def test_append_with_path_inside_roots_is_written(monkeypatch, allowed_file):
+    fake = _FakeReplaceApp()
+    _use(monkeypatch, fake)
+    com.append_page("{PAGE}", _with_file(f'<one:Image><one:File path="{allowed_file}"/></one:Image>'))
+    assert [call for call, _ in fake.calls] == ["update"]
+
+
+def test_replace_with_path_and_no_roots_is_refused(monkeypatch, allowed_file, clean_pagestate):
+    monkeypatch.delenv("ONENOTE_FILE_ROOTS")
+    fake = _FakeReplaceApp()
+    _use(monkeypatch, fake)
+    page = (
+        f'<one:Page {_XMLNS}><one:Title><one:OE><one:T>t</one:T></one:OE></one:Title>'
+        f'<one:Outline><one:OEChildren><one:OE><one:InsertedFile pathSource="{allowed_file}" preferredName="x"/>'
+        '</one:OE></one:OEChildren></one:Outline></one:Page>'
+    )
+    with pytest.raises(OneNoteError) as exc:
+        com.replace_page("{PAGE}", page, expected_revision="r")
+    assert "Inserting files is disabled" in str(exc.value)
+    assert fake.calls == []

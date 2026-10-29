@@ -54,6 +54,7 @@ import comtypes.typeinfo
 from onenote_mcp import backups, config, hierarchy, pagestate
 from onenote_mcp.builders import UNSUPPORTED_PAGE_OBJECT_TAGS, protected_items
 from onenote_mcp.images import pixel_size
+from onenote_mcp.paths import check_insert_path
 
 _ONE_NS = "http://schemas.microsoft.com/office/onenote/2013/onenote"
 ET.register_namespace("one", _ONE_NS)
@@ -468,6 +469,26 @@ def _parse_user_xml(xml_str: str, what: str) -> None:
             "element with the xmlns:one namespace declared.",
             code="bad_request",
         ) from exc
+
+
+# Elements whose attribute names a local file for OneNote to read.
+_FILE_PATH_ATTRS = (
+    (f"{{{_ONE_NS}}}File", "path"),
+    (f"{{{_ONE_NS}}}InsertedFile", "pathSource"),
+    (f"{{{_ONE_NS}}}MediaFile", "pathSource"),
+)
+
+
+def _check_insert_paths(xml_str: str, extra_roots: tuple[str, ...] = ()) -> None:
+    """Refuse (bad_request) a write whose XML asks OneNote to read a file
+    outside ONENOTE_FILE_ROOTS (plus *extra_roots*), before any COM call."""
+    root = ET.fromstring(xml_str)
+    roots = config.file_roots(os.environ)
+    for tag, attr in _FILE_PATH_ATTRS:
+        for el in root.iter(tag):
+            path = el.get(attr)
+            if path:
+                check_insert_path(path, roots, extra_roots=extra_roots)
 
 
 def allowlist_config_error() -> str | None:
@@ -1050,6 +1071,7 @@ def replace_page(
     handwriting, media) must be listed in *remove_ids*, else bad_request.
     """
     _parse_user_xml(page_xml, "page")
+    _check_insert_paths(page_xml)
     expected = pagestate.expected(page_id, expected_revision, required=True)
     try:
         _run_com(
@@ -1085,6 +1107,7 @@ def append_page(page_id: str, content_xml: str, expected_revision: str | None = 
     mcpref handles and partial image sizes are handled as in replace_page.
     """
     _parse_user_xml(content_xml, "content")
+    _check_insert_paths(content_xml)
     try:
         _run_com(
             _append_page_impl, page_id, content_xml, expected_revision,
@@ -1122,6 +1145,8 @@ def _restore_page_impl(backup_id: str, target_section_id: str | None) -> dict:
     # replaced deliberately.  The page's current state is backed up first, so
     # the restore can be undone too.
     xml = backups.restorable_xml(root, backup_id, page_xml, meta, page_id, drop_tags=UNSUPPORTED_PAGE_OBJECT_TAGS)
+    # Attachments come back from the backup's own files.
+    _check_insert_paths(xml, extra_roots=(str(root),))
     current_protected = frozenset(
         object_id for object_id, _ in protected_items(ET.fromstring(app.GetPageContent(page_id, 0)))
     )

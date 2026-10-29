@@ -1,8 +1,8 @@
-"""E2E tests: content the structured tools cannot write is reported, not dropped.
+"""E2E tests: content the structured tools cannot re-create is reported, not dropped.
 
 A page seeded via replace_page_xml with a file attached inside its outline and
-an indented paragraph must read back through get_page with a file marker and
-the nested child, and replace_page must refuse to write the marker back or to
+an indented paragraph must read back through get_page as an attachment item and
+the nested child, and replace_page must refuse to write the attachment back or to
 drop it silently.  A file attached directly to the page canvas must survive
 replace_page.  Requires OneNote desktop with the ClaudeSpike notebook open.
 The test pages are left in place after the test (no cleanup); the unique
@@ -54,7 +54,7 @@ def test_get_page_reports_file_and_indented_paragraph(mcp_session, claudespike_s
 
     attached, parent = mcp_session.call_tool("get_page", {"page_id": page_id})["outlines"][0]["items"]
     assert attached.pop("id")
-    assert attached == {"type": "unsupported", "kind": "file", "text": "seed.txt"}
+    assert attached == {"type": "attachment", "name": "seed.txt"}
     assert without_ids(parent) == _PARENT
 
 
@@ -64,7 +64,7 @@ def test_replace_page_refuses_to_drop_the_file(mcp_session, claudespike_section_
     page_id = _seed_page(mcp_session, claudespike_section_id, title, tmp_path / "seed.txt")
     content = mcp_session.call_tool("get_page", {"page_id": page_id})
 
-    with pytest.raises(RuntimeError, match=r"bad_request: .*kind 'file'"):
+    with pytest.raises(RuntimeError, match=r"bad_request: An attachment read from a page cannot be written back"):
         mcp_session.call_tool("replace_page", {
             "page_id": page_id, "title": title, "outlines": content["outlines"],
         })

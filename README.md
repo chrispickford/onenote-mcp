@@ -205,6 +205,24 @@ A text run (`segments` entry) can carry `"link": "https://..."`; `http://`, `htt
 `mailto:` and `onenote:` links are accepted. Links with other schemes read back as
 plain text.
 
+## Images and attachments from files
+
+An image (`inline_image`, or a floating image in `images`) takes exactly one source:
+`handle` (an `mcpref:` handle from `get_page`), `data` (base64 PNG, JPEG, GIF or BMP)
+or `path` (a local image file). With `path`, give both `width` and `height` or neither
+(the image's natural size), since the server does not open the file.
+
+`{"type": "attachment", "path": "C:\\...\\Plan.docx", "name": "Plan.docx"}` attaches a
+file to the page; `name` defaults to the file name. `get_page` reads attachments back
+as `{"type": "attachment", "id": ..., "name": ...}`. A read attachment has no path, so
+it cannot be written back: keep it with targeted edits, or list its `id` in
+`remove_ids` to delete it with a replace.
+
+OneNote reads these files itself and copies them into the notebook, which may sync to
+the cloud, so every path must lie inside a folder listed in `ONENOTE_FILE_ROOTS`.
+Unset, inserting from a path is disabled and `data` is the only way to add a new
+image.
+
 ## Page revisions
 
 `get_page` returns a `revision` token for the content it read. Writes that change or
@@ -292,6 +310,7 @@ the Claude Desktop server entry if needed):
 | `ONENOTE_READ_TIMEOUT` | `20` | Timeout (s) for page/hierarchy reads and image fetches. |
 | `ONENOTE_WRITE_TIMEOUT` | `25` | Timeout (s) for page creates and writes. |
 | `ONENOTE_PING_TIMEOUT` | `8` | Timeout (s) for the `ping` health probe. |
+| `ONENOTE_FILE_ROOTS` | _(unset: disabled)_ | Semicolon-separated folders OneNote may insert images and attachments from, e.g. `D:\Exports;C:\Users\me\Documents\Notes`. Paths are resolved (`..` and links) before the check, which ignores case. |
 | `ONENOTE_BACKUP_DIR` | `%LOCALAPPDATA%\onenote-mcp\backups` | Folder for page backups. |
 | `ONENOTE_BACKUP_RETENTION_DAYS` | `30` | Backups older than this many days are deleted when the next backup is taken. |
 | `ONENOTE_ABANDON_WRITE_AFTER` | `300` | Seconds after which a timed-out write that is still running stops blocking further writes to its page. |

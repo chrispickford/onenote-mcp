@@ -5,7 +5,10 @@ FastMCP exposes these types as machine-readable JSON schema to the model.
 """
 
 from __future__ import annotations
+import base64
+import binascii
 from typing import Annotated, Any, Literal, Union
+from onenote_mcp.images import pixel_size
 from pydantic import (
     BaseModel, Discriminator, Field, StringConstraints, Tag, field_validator, model_validator,
 )
@@ -79,6 +82,36 @@ class Paragraph(BaseModel):
         return self
 
 
+def _check_handle(value: str | None) -> str | None:
+    if value is not None and not value.startswith("mcpref:"):
+        raise ValueError("'handle' must start with 'mcpref:'.")
+    return value
+
+
+def _check_image_data(value: str | None) -> str | None:
+    """Accept base64 bytes of an image whose pixel size can be read."""
+    if value is None:
+        return None
+    try:
+        raw = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        raw = b""
+    if pixel_size(raw) is None:
+        raise ValueError("data must be a base64 PNG, JPEG, GIF or BMP image.")
+    return value
+
+
+def _check_image_source(image: "InlineImage | FloatingImage") -> None:
+    """Exactly one source; a path image (not read by the server) needs both sizes or neither."""
+    if sum(source is not None for source in (image.handle, image.path, image.data)) != 1:
+        raise ValueError("Give exactly one of 'handle', 'path' or 'data' for an image.")
+    if image.path is not None and (image.width is None) != (image.height is None):
+        raise ValueError(
+            "For an image from 'path', give both width and height, or neither for its natural size: "
+            "the server does not open the file to compute the other dimension."
+        )
+
+
 class ImagePlaceholder(BaseModel):
     """A screenshot placeholder: a highlighted label above a light box reserving the screenshot's space."""
 
@@ -100,17 +133,27 @@ class InlineImage(BaseModel):
 
     type: Literal["inline_image"]
     id: str | None = Field(None, description=_ID_DESCRIPTION)
-    handle: str = Field(description="Image handle from a get_page response, e.g. 'mcpref:a1b2c3d4e5f6'. Must start with 'mcpref:'.")
-    width: float | None = Field(None, description="Display width in points. Give only width or only height to scale proportionally; omit both for the natural size.")
-    height: float | None = Field(None, description="Display height in points. Give only width or only height to scale proportionally; omit both for the natural size.")
+    handle: str | None = Field(None, description="Image handle from a get_page response, e.g. 'mcpref:a1b2c3d4e5f6', to reuse an image already in OneNote. Give exactly one of handle, path or data.")
+    path: str | None = Field(None, description="Absolute path of a local image file for OneNote to insert (inside ONENOTE_FILE_ROOTS). Give both width and height, or neither for the image's natural size. Give exactly one of handle, path or data.")
+    data: str | None = Field(None, description="Base64 bytes of a PNG, JPEG, GIF or BMP image. Give exactly one of handle, path or data.")
+    width: float | None = Field(None, description="Display width in points. With handle or data, give only width or only height to scale proportionally; omit both for the natural size.")
+    height: float | None = Field(None, description="Display height in points. With handle or data, give only width or only height to scale proportionally; omit both for the natural size.")
     children: list[ContentItem] = Field(default_factory=list, description="Content indented one level under this image, in order.")
 
     @field_validator("handle")
     @classmethod
-    def _handle_must_start_with_mcpref(cls, value: str) -> str:
-        if not value.startswith("mcpref:"):
-            raise ValueError("'handle' must start with 'mcpref:'.")
-        return value
+    def _handle_must_start_with_mcpref(cls, value: str | None) -> str | None:
+        return _check_handle(value)
+
+    @field_validator("data")
+    @classmethod
+    def _data_must_be_an_image(cls, value: str | None) -> str | None:
+        return _check_image_data(value)
+
+    @model_validator(mode="after")
+    def _check_source(self) -> InlineImage:
+        _check_image_source(self)
+        return self
 
 
 class ListItem(BaseModel):
@@ -184,6 +227,21 @@ class Table(BaseModel):
         return self
 
 
+class Attachment(BaseModel):
+    """A file attached to the page (OneNote shows it as an icon with its name).
+
+    To attach, give 'path' (OneNote copies the file into the page). Read back,
+    an attachment has its 'name' and 'id' but no path: it cannot be written
+    back by replace_page, so keep it with targeted edits.
+    """
+
+    type: Literal["attachment"]
+    id: str | None = Field(None, description=_ID_DESCRIPTION)
+    path: str | None = Field(None, description="Absolute path of the local file to attach (inside ONENOTE_FILE_ROOTS). Write only.")
+    name: str | None = Field(None, description="The name shown on the page. Defaults to the file name of 'path'.")
+    children: list[ContentItem] = Field(default_factory=list, description="Content indented one level under the attachment, in order.")
+
+
 UnsupportedKind = Literal["table", "ink", "file", "media", "unknown"]
 _UNSUPPORTED_KIND_DESCRIPTION = (
     "What the content is: 'ink' (handwriting or a drawing, including typed text "
@@ -212,7 +270,7 @@ class UnsupportedItem(BaseModel):
 
 
 ContentItem = Annotated[
-    Union[Paragraph, ImagePlaceholder, InlineImage, List, Table, UnsupportedItem],
+    Union[Paragraph, ImagePlaceholder, InlineImage, List, Table, Attachment, UnsupportedItem],
     Field(discriminator="type"),
 ]
 
@@ -239,6 +297,7 @@ InlineImage.model_rebuild()
 ListItem.model_rebuild()
 UnsupportedItem.model_rebuild()
 TableCell.model_rebuild()
+Attachment.model_rebuild()
 Table.model_rebuild()
 
 
@@ -262,17 +321,27 @@ class FloatingImage(BaseModel):
     """A floating image positioned directly on the page canvas (not inside an outline)."""
 
     id: str | None = Field(None, description=_ID_DESCRIPTION)
-    handle: str = Field(description="Image handle from a get_page response, e.g. 'mcpref:a1b2c3d4e5f6'. Must start with 'mcpref:'.")
-    width: float | None = Field(None, description="Display width in points. Give only width or only height to scale proportionally; omit both for the natural size.")
-    height: float | None = Field(None, description="Display height in points. Give only width or only height to scale proportionally; omit both for the natural size.")
+    handle: str | None = Field(None, description="Image handle from a get_page response, e.g. 'mcpref:a1b2c3d4e5f6', to reuse an image already in OneNote. Give exactly one of handle, path or data.")
+    path: str | None = Field(None, description="Absolute path of a local image file for OneNote to insert (inside ONENOTE_FILE_ROOTS). Give both width and height, or neither for the image's natural size. Give exactly one of handle, path or data.")
+    data: str | None = Field(None, description="Base64 bytes of a PNG, JPEG, GIF or BMP image. Give exactly one of handle, path or data.")
+    width: float | None = Field(None, description="Display width in points. With handle or data, give only width or only height to scale proportionally; omit both for the natural size.")
+    height: float | None = Field(None, description="Display height in points. With handle or data, give only width or only height to scale proportionally; omit both for the natural size.")
     position: Position | None = Field(None, description="Canvas position. Omit to let OneNote place the image automatically.")
 
     @field_validator("handle")
     @classmethod
-    def _handle_must_start_with_mcpref(cls, value: str) -> str:
-        if not value.startswith("mcpref:"):
-            raise ValueError("'handle' must start with 'mcpref:'.")
-        return value
+    def _handle_must_start_with_mcpref(cls, value: str | None) -> str | None:
+        return _check_handle(value)
+
+    @field_validator("data")
+    @classmethod
+    def _data_must_be_an_image(cls, value: str | None) -> str | None:
+        return _check_image_data(value)
+
+    @model_validator(mode="after")
+    def _check_source(self) -> FloatingImage:
+        _check_image_source(self)
+        return self
 
 
 class UnsupportedPageObject(BaseModel):

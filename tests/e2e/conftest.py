@@ -6,6 +6,7 @@ a real notebook.
 """
 import os
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -23,6 +24,9 @@ TEST_NOTEBOOK = "ClaudeSpike"
 os.environ["ONENOTE_ALLOWED_NOTEBOOKS"] = TEST_NOTEBOOK
 # The raw XML tools are off by default; their e2e tests need them.
 os.environ["ONENOTE_ENABLE_RAW_XML"] = "1"
+# Tests insert files from pytest's temporary folders and the test files folder.
+TEST_FILES = r"D:\scratch\onenote-mcp-tests\files"
+os.environ["ONENOTE_FILE_ROOTS"] = f"{tempfile.gettempdir()};{TEST_FILES}"
 # Backups of test pages stay next to the test notebook, not in %LOCALAPPDATA%.
 os.environ["ONENOTE_BACKUP_DIR"] = r"D:\scratch\onenote-mcp-tests\backups"
 

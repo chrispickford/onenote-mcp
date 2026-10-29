@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import html as _html_module
+import ntpath
 import re
 import struct
 import xml.etree.ElementTree as ET
@@ -21,7 +22,7 @@ from html.parser import HTMLParser
 
 from onenote_mcp.models import (
     FONT_FAMILY_MAX_LENGTH, FONT_FAMILY_PATTERN, HEX_COLOR_PATTERN,
-    LINK_SCHEMES, ContentItem, FloatingImage, ImagePlaceholder, InlineImage, List, ListChild, ListItem,
+    LINK_SCHEMES, Attachment, ContentItem, FloatingImage, ImagePlaceholder, InlineImage, List, ListChild, ListItem,
     Table, TableCell,
     Outline, PageContent, PageOutline, Paragraph, Position, TextRun, UnsupportedItem,
     UnsupportedPageObject,
@@ -225,11 +226,18 @@ def _floating_image_to_el(img: FloatingImage) -> ET.Element:
         pos_el.set("z", str(img.position.z))
 
     _add_image_size(image_el, img.width, img.height)
-
-    data_el = ET.SubElement(image_el, f"{{{_ONE_NS}}}Data")
-    data_el.text = img.handle
-
+    _add_image_source(image_el, img)
     return image_el
+
+
+def _add_image_source(image_el: ET.Element, img: "InlineImage | FloatingImage") -> None:
+    """Add the image's bytes: a <one:Data> holding a handle or base64 data, or a
+    <one:File> whose path OneNote reads itself."""
+    if img.path is not None:
+        ET.SubElement(image_el, f"{{{_ONE_NS}}}File", {"path": img.path})
+        return
+    data_el = ET.SubElement(image_el, f"{{{_ONE_NS}}}Data")
+    data_el.text = img.handle if img.handle is not None else img.data
 
 
 # ---- InlineImage → OE element -----------------------------------------------
@@ -248,9 +256,7 @@ def _inline_image_to_oe(
     image_el = ET.SubElement(oe, f"{{{_ONE_NS}}}Image")
 
     _add_image_size(image_el, img.width, img.height)
-
-    data_el = ET.SubElement(image_el, f"{{{_ONE_NS}}}Data")
-    data_el.text = img.handle
+    _add_image_source(image_el, img)
 
     _append_children(oe, _items_to_oes(img.children, cdata_map, cdata_counter))
     return oe
@@ -455,7 +461,32 @@ def _item_to_oes(
         return _list_to_oes(item, cdata_map, cdata_counter)
     if isinstance(item, Table):
         return [_table_to_oe(item, cdata_map, cdata_counter)]
+    if isinstance(item, Attachment):
+        return [_attachment_to_oe(item, cdata_map, cdata_counter)]
     raise ValueError(_UNSUPPORTED_ITEM_ERROR.format(kind=item.kind))
+
+
+def _attachment_to_oe(
+    attachment: Attachment,
+    cdata_map: dict[int, str],
+    cdata_counter: list[int],
+) -> ET.Element:
+    """Return the OE holding a <one:InsertedFile> OneNote copies from *attachment*.path.
+
+    An attachment read from a page has no path, so it cannot be re-created.
+    """
+    if attachment.path is None:
+        raise ValueError(
+            "An attachment read from a page cannot be written back; use targeted edits to keep it "
+            "(or list its id in remove_ids to delete it)."
+        )
+    oe = ET.Element(f"{{{_ONE_NS}}}OE")
+    ET.SubElement(oe, f"{{{_ONE_NS}}}InsertedFile", {
+        "pathSource": attachment.path,
+        "preferredName": attachment.name or ntpath.basename(attachment.path),
+    })
+    _append_children(oe, _items_to_oes(attachment.children, cdata_map, cdata_counter))
+    return oe
 
 
 def _table_to_oe(
@@ -1193,7 +1224,10 @@ def _parse_oe(
         children = _parse_outline_items(_child_oes(el), quick_style_map)
         img_el = el.find(f"{{{_ONE_NS}}}Image")
         table_el = el.find(f"{{{_ONE_NS}}}Table")
-        if _unsupported_content(el) is not None:
+        content = _unsupported_content(el)
+        if content is not None and content.tag == f"{{{_ONE_NS}}}InsertedFile":
+            item = Attachment(type="attachment", name=content.get("preferredName"), children=children)
+        elif content is not None:
             item = _parse_unsupported_oe(el, children)
         elif table_el is not None:
             item = _parse_table(table_el, quick_style_map, children)

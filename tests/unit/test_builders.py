@@ -1692,12 +1692,10 @@ def test_parse_text_mixed_with_ink_words_keeps_both_in_order():
 @pytest.mark.parametrize("content, expected", [
     ('<one:InkDrawing><one:CallbackID callbackID="{1}"/></one:InkDrawing>',
      {"type": "unsupported", "kind": "ink"}),
-    ('<one:InsertedFile pathCache="C:\\cache\\x.bin" preferredName="report.pdf"/>',
-     {"type": "unsupported", "kind": "file", "text": "report.pdf"}),
     ('<one:MediaFile pathCache="C:\\cache\\y.bin" preferredName="Recording.wma"/>',
      {"type": "unsupported", "kind": "media", "text": "Recording.wma"}),
     ("<one:FutureObject/>", {"type": "unsupported", "kind": "unknown"}),
-], ids=["ink-drawing", "inserted-file", "media-file", "future-object"])
+], ids=["ink-drawing", "media-file", "future-object"])
 def test_parse_other_oe_content_becomes_unsupported_item(content, expected):
     assert _items(f"<one:OE>{content}</one:OE>") == [expected]
 
@@ -1919,10 +1917,20 @@ def test_unsupported_item_reports_its_object_id():
     from onenote_mcp.builders import parse_page
     ns = "http://schemas.microsoft.com/office/onenote/2013/onenote"
     xml = (f'<one:Page xmlns:one="{ns}"><one:Title><one:OE><one:T>t</one:T></one:OE></one:Title>'
-           '<one:Outline><one:OEChildren><one:OE objectID="{X}{1}{B0}"><one:InsertedFile preferredName="a.pdf"/>'
+           '<one:Outline><one:OEChildren><one:OE objectID="{X}{1}{B0}"><one:InkParagraph/>'
            '</one:OE></one:OEChildren></one:Outline></one:Page>')
     (item,) = parse_page(xml).outlines[0].items
     assert item.type == "unsupported" and item.id == "{X}{1}{B0}"
+
+
+def test_attachment_reports_its_object_id():
+    from onenote_mcp.builders import parse_page
+    ns = "http://schemas.microsoft.com/office/onenote/2013/onenote"
+    xml = (f'<one:Page xmlns:one="{ns}"><one:Title><one:OE><one:T>t</one:T></one:OE></one:Title>'
+           '<one:Outline><one:OEChildren><one:OE objectID="{X}{2}{B0}"><one:InsertedFile preferredName="a.pdf"/>'
+           '</one:OE></one:OEChildren></one:Outline></one:Page>')
+    (item,) = parse_page(xml).outlines[0].items
+    assert item.type == "attachment" and item.id == "{X}{2}{B0}"
 
 
 def test_parse_page_reports_oe_ids():
@@ -2100,3 +2108,80 @@ def test_table_reports_only_locked_column_widths():
     )
     assert _items(f"<one:OE>{locked}</one:OE>")[0]["column_widths"] == [100.0]
     assert "column_widths" not in _items(f"<one:OE>{auto}</one:OE>")[0]
+
+
+# ---------------------------------------------------------------------------
+# Images from a file or base64 data; attachments
+# ---------------------------------------------------------------------------
+
+from onenote_mcp.models import Attachment  # noqa: E402
+
+_PNG = base64.b64encode(
+    b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + (40).to_bytes(4, "big") + (20).to_bytes(4, "big")
+    + b"\x08\x02\x00\x00\x00" + b"\x00" * 4
+).decode()
+
+
+@pytest.mark.parametrize("sources", [
+    {}, {"handle": "mcpref:abc", "path": "C:/a.png"}, {"path": "C:/a.png", "data": _PNG},
+])
+def test_image_exactly_one_source(sources):
+    with pytest.raises(ValueError, match="exactly one of 'handle', 'path' or 'data'"):
+        InlineImage(type="inline_image", **sources)
+    with pytest.raises(ValueError, match="exactly one of 'handle', 'path' or 'data'"):
+        FloatingImage(**sources)
+
+
+@pytest.mark.parametrize("size", [{"width": 10.0}, {"height": 10.0}])
+def test_path_image_needs_both_dims_or_neither(size):
+    with pytest.raises(ValueError, match="give both width and height, or neither"):
+        InlineImage(type="inline_image", path="C:/a.png", **size)
+    InlineImage(type="inline_image", path="C:/a.png", width=10.0, height=5.0)
+    InlineImage(type="inline_image", path="C:/a.png")
+
+
+@pytest.mark.parametrize("data", ["not base64!", base64.b64encode(b"plain text").decode()])
+def test_data_image_validated(data):
+    with pytest.raises(ValueError, match="data must be a base64 PNG, JPEG, GIF or BMP image"):
+        InlineImage(type="inline_image", data=data)
+
+
+def test_image_path_written_as_file_element():
+    xml = build_page_xml("t", [Outline(items=[InlineImage(type="inline_image", path="C:/pics/a.png")])])
+    image = ET.fromstring(xml).find(f".//{{{_ONE_NS_URI}}}Image")
+    assert image.find(f"{{{_ONE_NS_URI}}}File").get("path") == "C:/pics/a.png"
+    assert image.find(f"{{{_ONE_NS_URI}}}Data") is None
+
+
+def test_image_data_written_as_data_element():
+    xml = build_page_xml("t", [], [FloatingImage(data=_PNG, width=40.0)])
+    image = ET.fromstring(xml).find(f"{{{_ONE_NS_URI}}}Image")
+    assert image.find(f"{{{_ONE_NS_URI}}}Data").text == _PNG
+
+
+def test_attachment_written_as_inserted_file():
+    xml = build_page_xml("t", [Outline(items=[Attachment(type="attachment", path="C:/docs/Plan.docx")])])
+    file_el = ET.fromstring(xml).find(f".//{{{_ONE_NS_URI}}}OE/{{{_ONE_NS_URI}}}InsertedFile")
+    assert file_el.get("pathSource") == "C:/docs/Plan.docx"
+    assert file_el.get("preferredName") == "Plan.docx"
+
+
+def test_attachment_name_overrides_file_name():
+    xml = build_page_xml("t", [Outline(items=[Attachment(type="attachment", path="C:/d/x.bin", name="Original.xlsx")])])
+    assert ET.fromstring(xml).find(f".//{{{_ONE_NS_URI}}}InsertedFile").get("preferredName") == "Original.xlsx"
+
+
+def test_attachment_read_as_item():
+    items = _items('<one:OE objectID="{F}"><one:InsertedFile pathCache="C:/c.bin" preferredName="report.pdf"/></one:OE>')
+    assert items == [{"type": "attachment", "id": "{F}", "name": "report.pdf"}]
+
+
+def test_read_attachment_cannot_be_written():
+    with pytest.raises(ValueError, match="An attachment read from a page cannot be written back; use targeted edits to keep it"):
+        build_page_xml("t", [Outline(items=[Attachment(type="attachment", name="report.pdf")])])
+
+
+def test_attachment_still_protected_from_rewrites():
+    from onenote_mcp.builders import protected_items
+    page_root = ET.fromstring(_outline_xml('<one:OE objectID="{F}"><one:InsertedFile preferredName="r.pdf"/></one:OE>'))
+    assert protected_items(page_root) == [("{F}", "file")]
