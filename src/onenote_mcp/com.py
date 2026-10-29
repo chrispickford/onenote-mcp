@@ -51,7 +51,7 @@ import comtypes
 import comtypes.client
 import comtypes.typeinfo
 
-from onenote_mcp import pagestate
+from onenote_mcp import backups, config, pagestate
 from onenote_mcp.images import pixel_size
 
 _ONE_NS = "http://schemas.microsoft.com/office/onenote/2013/onenote"
@@ -679,22 +679,38 @@ def _partial_write_error(failures: list[str]) -> OneNoteError:
     )
 
 
+def _backup(app, page_id: str, tool: str) -> str:
+    """Back up *page_id* before *tool* changes it; return the backup_id.
+
+    Runs on the COM worker thread.  Backup folder and retention come from the
+    environment (config.py).
+    """
+    return backups.save(
+        app, page_id, tool,
+        root=config.backup_dir(os.environ),
+        retention_days=config.backup_retention_days(os.environ),
+    )
+
+
 def _replace_page_impl(
     page_id: str,
     page_xml: str,
     keep_tags: frozenset[str],
     expected_revision: str | None = None,
+    tool: str = "replace_page",
 ) -> None:
     """Full-replace implementation — runs on the worker thread.
 
     See replace_page docstring for full semantics.  With *expected_revision*
     the page must still have that revision, else conflict before any write.
+    The page is backed up (as *tool*) before anything is written.
     """
     app = _app()
     _ensure_allowed(app, page_id, "Page")
 
     current_xml = app.GetPageContent(page_id, 0)
     pagestate.check(page_id, current_xml, expected_revision)
+    _backup(app, page_id, tool)
     current_root = ET.fromstring(current_xml)
 
     # --- prepare write XML (before any deletion) ---
@@ -1037,3 +1053,49 @@ def append_page(page_id: str, content_xml: str, expected_revision: str | None = 
         raise OneNoteError(
             f"append_page failed (page {page_id!r}): hresult={exc.hresult:#010x}"
         ) from exc
+
+
+def _page_exists(app, page_id: str) -> bool:
+    root = ET.fromstring(app.GetHierarchy("", 4))
+    return any(el.get("ID") == page_id for el in root.iter(f"{{{_ONE_NS}}}Page"))
+
+
+def _restore_page_impl(backup_id: str, target_section_id: str | None) -> dict:
+    root = config.backup_dir(os.environ)
+    page_xml, meta = backups.load(root, backup_id)
+    app = _app()
+    page_id = meta["page_id"]
+    restored_over = _page_exists(app, page_id)
+    if not restored_over:
+        if target_section_id is None:
+            raise OneNoteError(
+                f"Page {page_id!r} of backup {backup_id!r} no longer exists; pass "
+                "target_section_id to restore it as a new page there.",
+                code="bad_request",
+            )
+        _ensure_allowed(app, target_section_id, "Section")
+        page_id = app.CreateNewPage(target_section_id)
+    xml = backups.restorable_xml(root, backup_id, page_xml, meta, page_id)
+    # The backup replaces everything, canvas objects included; the page's
+    # current state is backed up first, so the restore can be undone too.
+    _replace_page_impl(page_id, xml, frozenset(), None, "restore_page")
+    return {
+        "page_id": page_id,
+        "restored_over": restored_over,
+        "missing_attachments": meta.get("missing_attachments", []),
+    }
+
+
+def list_backups(page_id: str | None = None, section_id: str | None = None, since: str | None = None) -> list[dict]:
+    """Return the matching local backups, newest first (no COM involved)."""
+    return backups.list_backups(config.backup_dir(os.environ), page_id=page_id, section_id=section_id, since=since)
+
+
+def restore_page(backup_id: str, target_section_id: str | None = None) -> dict:
+    """Write a backup back over its page, or as a new page in *target_section_id*
+    when the page no longer exists.  Returns {"page_id", "restored_over",
+    "missing_attachments"}."""
+    try:
+        return _run_com(_restore_page_impl, backup_id, target_section_id, timeout=WRITE_TIMEOUT)
+    except comtypes.COMError as exc:
+        raise OneNoteError(f"restore_page failed (backup {backup_id!r}): hresult={exc.hresult:#010x}") from exc

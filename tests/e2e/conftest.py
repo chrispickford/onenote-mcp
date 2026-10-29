@@ -23,6 +23,8 @@ TEST_NOTEBOOK = "ClaudeSpike"
 os.environ["ONENOTE_ALLOWED_NOTEBOOKS"] = TEST_NOTEBOOK
 # The raw XML tools are off by default; their e2e tests need them.
 os.environ["ONENOTE_ENABLE_RAW_XML"] = "1"
+# Backups of test pages stay next to the test notebook, not in %LOCALAPPDATA%.
+os.environ["ONENOTE_BACKUP_DIR"] = r"D:\scratch\onenote-mcp-tests\backups"
 
 # ---------------------------------------------------------------------------
 # OneNote availability check (done once at session start)

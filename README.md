@@ -169,6 +169,8 @@ pick a page → read/write tools below.
 | `create_page` | Create a page in a section, optionally as a sub-page of an existing page. Returns the new page id. |
 | `replace_page` | Replace a page's entire content from structured JSON (outlines + floating images). Rejects read-only `unsupported` items and keeps page-level objects it cannot write in place, see below. |
 | `append_page` | Append one structured content block to an existing page, preserving current content. Rejects read-only `unsupported` items. |
+| `list_backups` | List the local page backups taken before writes, newest first, optionally for one page or section or since a time. |
+| `restore_page` | Write a backup back over its page, or as a new page in a given section when the original is gone. |
 
 ### Health
 
@@ -201,6 +203,17 @@ A page the server has neither read nor created is refused with `bad_request` unt
 read. Appending needs no prior read.
 
 OneNote's own last-modified check is not used: it accepted stale writes in testing.
+
+## Backups and restore
+
+Before every write that changes or removes existing content, the server saves a
+backup of the page on this machine: its full XML with image data, a copy of each
+attachment, and where it lived (notebook, section, title). `list_backups` lists them,
+newest first, and `restore_page` writes one back over its page, or as a new page in a
+given section when the page is gone. A restore backs up the current content first, so
+it can be undone too. Backups are kept for `ONENOTE_BACKUP_RETENTION_DAYS` days in
+`ONENOTE_BACKUP_DIR` and never leave this machine; they hold notebook content, so treat
+the folder like the notebooks themselves.
 
 ## Image handles (`mcpref:`)
 
@@ -261,6 +274,8 @@ the Claude Desktop server entry if needed):
 | `ONENOTE_READ_TIMEOUT` | `20` | Timeout (s) for page/hierarchy reads and image fetches. |
 | `ONENOTE_WRITE_TIMEOUT` | `25` | Timeout (s) for page creates and writes. |
 | `ONENOTE_PING_TIMEOUT` | `8` | Timeout (s) for the `ping` health probe. |
+| `ONENOTE_BACKUP_DIR` | `%LOCALAPPDATA%\onenote-mcp\backups` | Folder for page backups. |
+| `ONENOTE_BACKUP_RETENTION_DAYS` | `30` | Backups older than this many days are deleted when the next backup is taken. |
 | `ONENOTE_IMAGE_CACHE_MB` | `200` | In-memory cap for cached image bytes; least-recently-used entries are evicted beyond it. |
 | `ONENOTE_ENABLE_RAW_XML` | _(unset: raw-XML tools off)_ | `1` or `true` (any case): the four raw-XML tools (`list_hierarchy_xml`, `get_page_xml`, `replace_page_xml`, `append_page_xml`) are registered. Unset, empty, `0` or `false`: they are not. Any other value stops the server at startup with an error. Read once at startup. |
 | `ONENOTE_DISABLE_RAW_XML` | _(unset)_ | The upstream setting, still honoured: `1` or `true` keeps the raw-XML tools off even when `ONENOTE_ENABLE_RAW_XML` is set. Same accepted values. |

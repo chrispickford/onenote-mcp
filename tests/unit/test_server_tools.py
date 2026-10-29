@@ -25,7 +25,7 @@ pytestmark = pytest.mark.skipif(
 _RAW_XML_TOOLS = {"list_hierarchy_xml", "get_page_xml", "replace_page_xml", "append_page_xml"}
 _STRUCTURED_TOOLS = {
     "ping", "validate_handles", "get_image_data", "get_notebooks", "list_pages",
-    "get_page", "create_page", "replace_page", "append_page",
+    "get_page", "create_page", "replace_page", "append_page", "list_backups", "restore_page",
 }
 
 
@@ -205,3 +205,23 @@ def test_append_tools_pass_expected_revision(monkeypatch, tool, arguments, raw):
     monkeypatch.setattr(server, "_append_page_com", lambda *args, **kwargs: calls.append(kwargs))
     _call(tool, {**arguments, "expected_revision": "r2"}, raw_xml_tools=raw)
     assert calls[0]["expected_revision"] == "r2"
+
+
+# ---------------------------------------------------------------------------
+# backups
+# ---------------------------------------------------------------------------
+
+def test_list_backups_tool_passes_filters(monkeypatch):
+    calls = []
+    monkeypatch.setattr(server, "_list_backups_com", lambda **kwargs: calls.append(kwargs) or [{"backup_id": "b"}])
+    _, structured = _call("list_backups", {"page_id": "p", "since": "2026-10-29T00:00:00Z"})
+    assert calls == [{"page_id": "p", "section_id": None, "since": "2026-10-29T00:00:00Z"}]
+    assert structured == {"result": [{"backup_id": "b"}]}
+
+
+def test_restore_page_tool(monkeypatch):
+    monkeypatch.setattr(server, "_restore_page_com", lambda backup_id, target_section_id=None: {
+        "page_id": "p", "restored_over": target_section_id is None, "missing_attachments": [],
+    })
+    (content,) = _call("restore_page", {"backup_id": "b"})
+    assert json.loads(content.text)["restored_over"] is True

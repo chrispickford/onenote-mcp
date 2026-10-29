@@ -12,7 +12,7 @@ from tests.png import png_base64 as _png_base64
 
 try:
     import comtypes
-    from onenote_mcp import com, pagestate
+    from onenote_mcp import backups, com, pagestate
     from onenote_mcp.builders import UNSUPPORTED_PAGE_OBJECT_TAGS
     from onenote_mcp.com import OneNoteError, _complete_image_sizes
     _COM_AVAILABLE = True
@@ -70,6 +70,11 @@ class _FakeApp:
 
     def GetPageContent(self, page_id: str, page_info: int) -> str:
         return f'<one:Page {_XMLNS} ID="{page_id}"/>'
+
+    def GetHierarchy(self, start: str, scope: int) -> str:
+        return (f'<one:Notebooks {_XMLNS}><one:Notebook ID="{{NB}}" name="N">'
+                '<one:Section ID="{SEC}" name="S"><one:Page ID="{PAGE}" name="Old"/></one:Section>'
+                '</one:Notebook></one:Notebooks>')
 
     def UpdatePageContent(self, xml: str, date_expected_last_modified: float) -> None:
         self.updates.append(xml)
@@ -147,6 +152,11 @@ class _FakeReplaceApp:
 
     def GetPageContent(self, page_id: str, page_info: int) -> str:
         return _CURRENT_PAGE
+
+    def GetHierarchy(self, start: str, scope: int) -> str:
+        return (f'<one:Notebooks {_XMLNS}><one:Notebook ID="{{NB}}" name="N">'
+                '<one:Section ID="{SEC}" name="S"><one:Page ID="{PAGE}" name="Old"/></one:Section>'
+                '</one:Notebook></one:Notebooks>')
 
     def DeletePageContent(self, page_id: str, object_id: str, date_expected_last_modified: float) -> None:
         self.calls.append(("delete", object_id))
@@ -283,3 +293,70 @@ def test_append_with_stale_given_revision_is_conflict(monkeypatch, clean_pagesta
     with pytest.raises(OneNoteError) as exc:
         com.append_page("{PAGE}", f'<one:Outline {_XMLNS}><one:OEChildren/></one:Outline>', "0000000000000000")
     assert exc.value.code == "conflict"
+
+
+# ---------------------------------------------------------------------------
+# backups and restore
+# ---------------------------------------------------------------------------
+
+def test_replace_backs_up_before_writing(monkeypatch, clean_pagestate, _backup_dir):
+    fake = _FakeReplaceApp()
+    _use(monkeypatch, fake)
+    original_update = fake.UpdatePageContent
+
+    def update(xml, date):
+        assert len(backups.list_backups(_backup_dir, page_id="{PAGE}")) == 1, "backup must exist before the write"
+        original_update(xml, date)
+
+    fake.UpdatePageContent = update
+    com._replace_page_impl("{PAGE}", _NEW_PAGE, frozenset(), pagestate.revision(_CURRENT_PAGE))
+    (meta,) = backups.list_backups(_backup_dir, page_id="{PAGE}")
+    assert meta["tool"] == "replace_page"
+
+
+def test_conflict_takes_no_backup(monkeypatch, clean_pagestate, _backup_dir):
+    fake = _FakeReplaceApp()
+    _use(monkeypatch, fake)
+    with pytest.raises(OneNoteError):
+        com._replace_page_impl("{PAGE}", _NEW_PAGE, frozenset(), "0000000000000000")
+    assert backups.list_backups(_backup_dir) == []
+
+
+def test_restore_over_existing_page_backs_up_then_writes_backup_content(monkeypatch, clean_pagestate, _backup_dir):
+    fake = _FakeReplaceApp()
+    _use(monkeypatch, fake)
+    backup_id = backups.save(fake, "{PAGE}", "replace_page", root=_backup_dir, retention_days=30)
+
+    result = com.restore_page(backup_id)
+
+    assert result == {"page_id": "{PAGE}", "restored_over": True, "missing_attachments": ["a.pdf"]}
+    written = ET.fromstring([arg for call, arg in fake.calls if call == "update"][-1])
+    assert [t.text for t in written.iter(f"{{{_ONE_NS}}}T")] == ["Old", "a", "b"]
+    assert [m["tool"] for m in backups.list_backups(_backup_dir)] == ["restore_page", "replace_page"]
+
+
+def test_restore_requires_target_when_page_gone(monkeypatch, clean_pagestate, _backup_dir):
+    fake = _FakeReplaceApp()
+    _use(monkeypatch, fake)
+    backup_id = backups.save(fake, "{PAGE}", "t", root=_backup_dir, retention_days=30)
+    fake.GetHierarchy = lambda start, scope: f'<one:Notebooks {_XMLNS}/>'
+    with pytest.raises(OneNoteError) as exc:
+        com.restore_page(backup_id)
+    assert exc.value.code == "bad_request"
+    assert "target_section_id" in str(exc.value)
+
+
+def test_restore_into_new_page_when_page_gone(monkeypatch, clean_pagestate, _backup_dir):
+    fake = _FakeReplaceApp()
+    _use(monkeypatch, fake)
+    backup_id = backups.save(fake, "{PAGE}", "t", root=_backup_dir, retention_days=30)
+    fake.GetHierarchy = lambda start, scope: (
+        f'<one:Notebooks {_XMLNS}><one:Notebook ID="{{NB}}" name="N"><one:Section ID="{{SEC2}}" name="S2"/>'
+        '</one:Notebook></one:Notebooks>')
+    fake.CreateNewPage = lambda section_id: "{NEWPAGE}"
+
+    result = com.restore_page(backup_id, target_section_id="{SEC2}")
+
+    assert result["page_id"] == "{NEWPAGE}" and result["restored_over"] is False
+    written = ET.fromstring([arg for call, arg in fake.calls if call == "update"][-1])
+    assert written.get("ID") == "{NEWPAGE}"

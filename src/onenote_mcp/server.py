@@ -44,6 +44,8 @@ from onenote_mcp.com import (
     create_page as _create_page_com,
     replace_page as _replace_page_com,
     append_page as _append_page_com,
+    list_backups as _list_backups_com,
+    restore_page as _restore_page_com,
 )
 from onenote_mcp.models import FloatingImage, Outline, PageContent
 from onenote_mcp.builders import (
@@ -543,6 +545,47 @@ async def append_page(page_id: str, outline: Outline, expected_revision: str | N
         page_xml = build_append_xml(outline)
         await asyncio.to_thread(_append_page_com, page_id, page_xml, expected_revision=expected_revision)
         return "ok"
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def list_backups(page_id: str | None = None, section_id: str | None = None, since: str | None = None) -> list[dict]:
+    """List the local page backups, newest first.
+
+    The server backs up a page (content, images and attachments) before every
+    write that changes or removes existing content, and before restore_page.
+    Backups stay on this machine for ONENOTE_BACKUP_RETENTION_DAYS (default 30).
+
+    page_id / section_id: only backups of that page / of pages in that section.
+    since: only backups made at or after this ISO 8601 time, e.g. "2026-10-29T12:00:00Z".
+
+    Returns [{"backup_id", "page_id", "title", "notebook_id", "notebook_name",
+    "section_id", "section_name", "tool", "created", "attachments",
+    "missing_attachments"}]. Pass a backup_id to restore_page.
+    """
+    try:
+        return await asyncio.to_thread(_list_backups_com, page_id=page_id, section_id=section_id, since=since)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def restore_page(backup_id: str, target_section_id: str | None = None) -> dict:
+    """Restore a page from a backup (see list_backups).
+
+    If the backed-up page still exists, its whole content is replaced by the
+    backup (the current content is backed up first, so this can be undone).
+    If it no longer exists, pass target_section_id: the backup is restored as a
+    new page there. For a deleted section, OneNote's own recycle bin is the
+    better first choice; restore_page brings back single pages.
+
+    Returns {"page_id", "restored_over": true|false, "missing_attachments": [...]}
+    where missing_attachments names attachments that could not be backed up
+    and so are not restored.
+    """
+    try:
+        return await asyncio.to_thread(_restore_page_com, backup_id, target_section_id)
     except (OneNoteError, ValueError) as exc:
         raise _fail(exc) from exc
 
