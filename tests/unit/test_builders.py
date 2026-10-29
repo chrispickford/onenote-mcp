@@ -1649,10 +1649,23 @@ _TABLE = (
 )
 
 
-def test_parse_table_becomes_unsupported_item_with_cell_text():
-    assert _items(f"<one:OE>{_TABLE}</one:OE>") == [
-        {"type": "unsupported", "kind": "table", "text": "Name | Age\nAda Lovelace | 36"},
-    ]
+_TABLE_DUMP = {
+    "type": "table",
+    "rows": [
+        [{"items": [{"type": "paragraph", "text": "Name"}]}, {"items": [{"type": "paragraph", "text": "Age"}]}],
+        [
+            {"items": [
+                {"type": "paragraph", "text": "Ada", "bold": True},
+                {"type": "paragraph", "text": "Lovelace"},
+            ]},
+            {"items": [{"type": "paragraph", "text": "36"}]},
+        ],
+    ],
+}
+
+
+def test_parse_table_becomes_table_item():
+    assert _items(f"<one:OE>{_TABLE}</one:OE>") == [_TABLE_DUMP]
 
 
 def test_parse_ink_paragraph_reports_recognized_text():
@@ -1689,30 +1702,35 @@ def test_parse_other_oe_content_becomes_unsupported_item(content, expected):
     assert _items(f"<one:OE>{content}</one:OE>") == [expected]
 
 
-def test_parse_unsupported_item_keeps_its_children():
+def test_parse_table_keeps_its_children():
     items = _items(
         f"<one:OE>{_TABLE}<one:OEChildren><one:OE><one:T>below the table</one:T></one:OE></one:OEChildren></one:OE>"
     )
     assert items[0]["children"] == [{"type": "paragraph", "text": "below the table"}]
 
 
-def test_parse_bulleted_table_is_read_as_unsupported_item_between_lists():
+def test_parse_unsupported_item_keeps_its_children():
+    items = _items(
+        "<one:OE><one:InkParagraph/><one:OEChildren><one:OE><one:T>below the ink</one:T></one:OE></one:OEChildren></one:OE>"
+    )
+    assert items[0]["type"] == "unsupported"
+    assert items[0]["children"] == [{"type": "paragraph", "text": "below the ink"}]
+
+
+def test_parse_bulleted_table_is_read_as_table_between_lists():
     items = _items(
         f"<one:OE>{_BULLET}<one:T>a</one:T></one:OE>",
         f"<one:OE>{_BULLET}{_TABLE}</one:OE>",
         f"<one:OE>{_BULLET}<one:T>b</one:T></one:OE>",
     )
-    assert [item["type"] for item in items] == ["list", "unsupported", "list"]
-    assert items[1]["kind"] == "table"
+    assert [item["type"] for item in items] == ["list", "table", "list"]
 
 
-def test_parse_unsupported_content_nested_under_list_item():
+def test_parse_table_nested_under_list_item():
     items = _items(
         f"<one:OE>{_BULLET}<one:T>step</one:T><one:OEChildren><one:OE>{_TABLE}</one:OE></one:OEChildren></one:OE>"
     )
-    assert items[0]["items"][0]["children"] == [
-        {"type": "unsupported", "kind": "table", "text": "Name | Age\nAda Lovelace | 36"},
-    ]
+    assert items[0]["items"][0]["children"] == [_TABLE_DUMP]
 
 
 def test_parse_page_reports_page_level_ink_drawing():
@@ -1741,7 +1759,7 @@ def test_parse_page_without_unsupported_objects_omits_the_list():
     assert "unsupported" not in parse_page(xml).model_dump(exclude_defaults=True)
 
 
-_TABLE_ITEM = UnsupportedItem(type="unsupported", kind="table", text="a | b")
+_TABLE_ITEM = UnsupportedItem(type="unsupported", kind="file", text="a.pdf")
 
 
 @pytest.mark.parametrize("outline", [
@@ -1751,7 +1769,7 @@ _TABLE_ITEM = UnsupportedItem(type="unsupported", kind="table", text="a | b")
     Outline(items=[InlineImage(type="inline_image", handle="mcpref:abc123def456", children=[_TABLE_ITEM])]),
 ], ids=["outline", "paragraph-child", "list-item-child", "image-child"])
 def test_build_page_xml_rejects_unsupported_items(outline):
-    with pytest.raises(ValueError, match=r"'unsupported' \(kind 'table'\).*delete that content.*remove the item"):
+    with pytest.raises(ValueError, match=r"'unsupported' \(kind 'file'\).*delete that content.*remove the item"):
         build_page_xml("Title", [outline])
 
 
@@ -1760,10 +1778,10 @@ def test_build_append_xml_rejects_unsupported_items():
         build_append_xml(Outline(items=[UnsupportedItem(type="unsupported", kind="ink")]))
 
 
-def test_read_page_with_table_cannot_be_written_back_unchanged():
+def test_read_page_with_table_round_trips():
     page = parse_page(_outline_xml("<one:OE><one:T>intro</one:T></one:OE>", f"<one:OE>{_TABLE}</one:OE>"))
-    with pytest.raises(ValueError, match="kind 'table'"):
-        build_page_xml(page.title, page.outlines, page.images)
+    first = page.model_dump(exclude_defaults=True)
+    assert _reread(page).model_dump(exclude_defaults=True) == first
 
 
 # ---------------------------------------------------------------------------
@@ -1933,3 +1951,152 @@ def test_ids_omitted_from_write_xml():
     from onenote_mcp.models import Outline, Paragraph
     xml = build_page_xml("t", [Outline(items=[Paragraph(type="paragraph", text="x", id="{P1}")])])
     assert "{P1}" not in xml
+
+
+
+# ---------------------------------------------------------------------------
+# Hyperlinks
+# ---------------------------------------------------------------------------
+
+from onenote_mcp.models import Table, TableCell, TextRun  # noqa: E402
+
+
+@pytest.mark.parametrize("url", ["javascript:alert(1)", "file:///C:/x", "data:text/html,x", "ftp://x"])
+def test_link_scheme_rejected(url):
+    with pytest.raises(ValueError, match="link must start with http://, https://, mailto: or onenote:"):
+        TextRun(text="x", link=url)
+
+
+@pytest.mark.parametrize("url", ["https://a.b/c", "HTTP://a.b", "mailto:a@b.c", "onenote:#Page&section-id={X}"])
+def test_link_scheme_accepted(url):
+    assert TextRun(text="x", link=url).link == url
+
+
+def test_link_written_as_anchor():
+    xml = build_page_xml("t", [Outline(items=[Paragraph(type="paragraph", segments=[
+        TextRun(text="see "), TextRun(text="docs", link="https://x.y/?a=1&b=2", bold=True),
+    ])])])
+    assert '<a href="https://x.y/?a=1&amp;b=2"><span style="font-weight:bold">docs</span></a>' in xml
+
+
+def test_link_with_quote_is_escaped():
+    xml = build_page_xml("t", [Outline(items=[Paragraph(type="paragraph", segments=[
+        TextRun(text="q", link='https://x.y/"onmouseover="x'),
+    ])])])
+    assert 'href="https://x.y/&quot;onmouseover=&quot;x"' in xml
+
+
+def test_link_read_back():
+    page = parse_page(_outline_xml(
+        '<one:OE><one:T><![CDATA[see <a href="https://x.y/?a=1&amp;b=2">docs</a> now]]></one:T></one:OE>'
+    ))
+    assert page.model_dump(exclude_defaults=True)["outlines"][0]["items"] == [{
+        "type": "paragraph",
+        "segments": [{"text": "see "}, {"text": "docs", "link": "https://x.y/?a=1&b=2"}, {"text": " now"}],
+    }]
+
+
+def test_whole_paragraph_link_reads_as_segment():
+    page = parse_page(_outline_xml('<one:OE><one:T><![CDATA[<a href="https://x.y">all</a>]]></one:T></one:OE>'))
+    (item,) = page.model_dump(exclude_defaults=True)["outlines"][0]["items"]
+    assert item == {"type": "paragraph", "segments": [{"text": "all", "link": "https://x.y"}]}
+
+
+def test_link_with_other_scheme_is_read_as_text():
+    page = parse_page(_outline_xml('<one:OE><one:T><![CDATA[<a href="file:///C:/x.txt">file</a>]]></one:T></one:OE>'))
+    (item,) = page.model_dump(exclude_defaults=True)["outlines"][0]["items"]
+    assert item == {"type": "paragraph", "text": "file"}
+
+
+def test_link_round_trip():
+    outline = Outline(items=[Paragraph(type="paragraph", segments=[
+        TextRun(text="a "), TextRun(text="b", link="https://x.y/p?q=1&r=2"), TextRun(text=" c"),
+    ])])
+    first = parse_page(build_page_xml("t", [outline]))
+    assert _reread(first).model_dump(exclude_defaults=True) == first.model_dump(exclude_defaults=True)
+    assert first.outlines[0].items[0].segments[1].link == "https://x.y/p?q=1&r=2"
+
+
+# ---------------------------------------------------------------------------
+# Tables
+# ---------------------------------------------------------------------------
+
+def test_table_rows_must_match():
+    with pytest.raises(ValueError, match="All table rows must have the same number of cells"):
+        Table(type="table", rows=[["a", "b"], ["c"]])
+
+
+def test_table_needs_a_row():
+    with pytest.raises(ValueError, match="at least one row"):
+        Table(type="table", rows=[])
+
+
+def test_table_column_widths_must_match_columns():
+    with pytest.raises(ValueError, match="column_widths has 1 entries but the table has 2 columns"):
+        Table(type="table", rows=[["a", "b"]], column_widths=[10.0])
+
+
+def test_table_string_cells_coerced():
+    table = Table(type="table", rows=[["a", TableCell(items=[Paragraph(type="paragraph", text="b")])]])
+    assert table.rows[0][0] == TableCell(items=[Paragraph(type="paragraph", text="a")])
+
+
+def test_table_xml_shape():
+    xml = build_page_xml("t", [Outline(items=[Table(
+        type="table", rows=[["H1", "H2"], ["a", ""]], header_row=True, column_widths=[100.0, 150.0],
+    )])])
+    table = ET.fromstring(xml).find(f".//{{{_ONE_NS_URI}}}Table")
+    assert table.get("hasHeaderRow") == "true" and table.get("bordersVisible") == "true"
+    columns = table.find(f"{{{_ONE_NS_URI}}}Columns")
+    assert [(c.get("index"), c.get("width"), c.get("isLocked")) for c in columns] == [
+        ("0", "100.0", "true"), ("1", "150.0", "true"),
+    ]
+    rows = table.findall(f"{{{_ONE_NS_URI}}}Row")
+    assert len(rows) == 2
+    cell_texts = [[t.text or "" for t in cell.iter(f"{{{_ONE_NS_URI}}}T")] for cell in rows[1]]
+    assert cell_texts == [["a"], [""]], "an empty cell still holds one (empty) OE"
+
+
+def test_table_without_widths_omits_columns():
+    xml = build_page_xml("t", [Outline(items=[Table(type="table", rows=[["a"]], borders=False)])])
+    table = ET.fromstring(xml).find(f".//{{{_ONE_NS_URI}}}Table")
+    assert table.find(f"{{{_ONE_NS_URI}}}Columns") is None
+    assert table.get("bordersVisible") == "false"
+
+
+def test_table_round_trip_with_rich_cells_and_nesting():
+    table = Table(type="table", header_row=True, column_widths=[120.0, 200.0], rows=[
+        ["Item", "Notes"],
+        [
+            TableCell(items=[Paragraph(type="paragraph", segments=[TextRun(text="Bold", bold=True)])]),
+            TableCell(items=[
+                List(type="list", style="bullet", items=[ListItem(text="one"), ListItem(text="two")]),
+                Table(type="table", rows=[["nested"]]),
+            ]),
+        ],
+    ])
+    first = parse_page(build_page_xml("t", [Outline(items=[table])]))
+    dumped = first.model_dump(exclude_defaults=True)
+    assert dumped["outlines"][0]["items"][0]["header_row"] is True
+    assert dumped["outlines"][0]["items"][0]["rows"][1][1]["items"][0]["type"] == "list"
+    assert dumped["outlines"][0]["items"][0]["rows"][1][1]["items"][1]["type"] == "table"
+    assert _reread(first).model_dump(exclude_defaults=True) == dumped
+
+
+def test_table_no_longer_unsupported():
+    from onenote_mcp.builders import protected_items
+    page_root = ET.fromstring(_outline_xml(f'<one:OE objectID="{{T}}">{_TABLE}</one:OE>'))
+    assert protected_items(page_root) == []
+
+
+def test_table_reports_only_locked_column_widths():
+    locked = (
+        '<one:Table><one:Columns><one:Column index="0" width="100.0000076" isLocked="true"/></one:Columns>'
+        f"<one:Row>{_cell('a')}</one:Row></one:Table>"
+    )
+    auto = (
+        '<one:Table><one:Columns><one:Column index="0" width="37.11"/></one:Columns>'
+        f"<one:Row>{_cell('a')}</one:Row></one:Table>"
+    )
+    assert _items(f"<one:OE>{locked}</one:OE>")[0]["column_widths"] == [100.0]
+    assert "column_widths" not in _items(f"<one:OE>{auto}</one:OE>")[0]

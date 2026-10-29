@@ -18,6 +18,9 @@ FONT_FAMILY_MAX_LENGTH = 64
 
 HexColor = Annotated[str, StringConstraints(pattern=HEX_COLOR_PATTERN)]
 
+# Hyperlink schemes a TextRun may carry (compared case-insensitively).
+LINK_SCHEMES = ("http://", "https://", "mailto:", "onenote:")
+
 _ID_DESCRIPTION = (
     "Read-only: OneNote objectID of this item, for the targeted edit tools. "
     "Ignored when writing, so items copied from get_page can be passed back unchanged."
@@ -39,6 +42,14 @@ class TextRun(BaseModel):
     highlight: HexColor | None = Field(None, description="Highlight colour as '#RGB' or '#RRGGBB', e.g. '#ffeb3b'. None means no highlight.")
     font_size: float | None = Field(None, description="Font size in points. None means default.")
     font_family: FontFamily | None = Field(None, description="Font family name, e.g. 'Courier New': letters, digits, spaces, hyphens, commas and periods, at most 64 characters. None means default.")
+    link: str | None = Field(None, description="Hyperlink target for this span: an http://, https://, mailto: or onenote: URL. None means no link. Links need 'segments'; the paragraph 'text' shorthand has none.")
+
+    @field_validator("link")
+    @classmethod
+    def _link_scheme_allowed(cls, value: str | None) -> str | None:
+        if value is not None and not value.lower().startswith(LINK_SCHEMES):
+            raise ValueError("link must start with http://, https://, mailto: or onenote:")
+        return value
 
 
 class Paragraph(BaseModel):
@@ -128,12 +139,54 @@ class List(BaseModel):
     items: list[ListItem] = Field(description="List items in order, top to bottom.")
 
 
-# Tables are not part of the slim model — write them with replace_page_xml /
-# append_page_xml using raw OneNote XML.  On read they appear as UnsupportedItem.
+class TableCell(BaseModel):
+    """One table cell: content items stacked vertically."""
+
+    items: list[CellItem] = Field(description="The cell's content in order: paragraphs, lists, inline images or nested tables. An empty list is an empty cell.")
+
+
+def _coerce_cell(value: Any) -> Any:
+    """A plain string in a row is shorthand for a cell holding one paragraph."""
+    if isinstance(value, str):
+        return {"items": [{"type": "paragraph", "text": value}]}
+    return value
+
+
+class Table(BaseModel):
+    """A table. OneNote has no merged cells: flatten them (repeat or leave cells empty)."""
+
+    type: Literal["table"]
+    id: str | None = Field(None, description=_ID_DESCRIPTION)
+    rows: list[list[TableCell]] = Field(description="Rows top to bottom, each a list of cells left to right; every row has the same number of cells. A cell may be given as a plain string, shorthand for one paragraph.")
+    header_row: bool = Field(False, description="Mark the first row as the header row (OneNote repeats it and screen readers announce it). Bold its text yourself if wanted.")
+    column_widths: list[float] | None = Field(None, description="Column widths in points, one per column. Omit to let OneNote size the columns to their content.")
+    borders: bool = Field(True, description="Show cell borders.")
+    children: list[ContentItem] = Field(default_factory=list, description="Content indented one level under the table, in order.")
+
+    @field_validator("rows", mode="before")
+    @classmethod
+    def _coerce_string_cells(cls, rows: Any) -> Any:
+        if isinstance(rows, list):
+            return [[_coerce_cell(cell) for cell in row] if isinstance(row, list) else row for row in rows]
+        return rows
+
+    @model_validator(mode="after")
+    def _check_shape(self) -> Table:
+        if not self.rows:
+            raise ValueError("A table needs at least one row.")
+        columns = len(self.rows[0])
+        if columns == 0 or any(len(row) != columns for row in self.rows):
+            raise ValueError("All table rows must have the same number of cells (at least one).")
+        if self.column_widths is not None and len(self.column_widths) != columns:
+            raise ValueError(
+                f"column_widths has {len(self.column_widths)} entries but the table has {columns} columns."
+            )
+        return self
+
 
 UnsupportedKind = Literal["table", "ink", "file", "media", "unknown"]
 _UNSUPPORTED_KIND_DESCRIPTION = (
-    "What the content is: 'table'; 'ink' (handwriting or a drawing, including typed text "
+    "What the content is: 'ink' (handwriting or a drawing, including typed text "
     "that shares a line with handwriting); 'file' (an attached file); 'media' (an audio or "
     "video recording); 'unknown' (content from a newer OneNote version)."
 )
@@ -159,7 +212,13 @@ class UnsupportedItem(BaseModel):
 
 
 ContentItem = Annotated[
-    Union[Paragraph, ImagePlaceholder, InlineImage, List, UnsupportedItem],
+    Union[Paragraph, ImagePlaceholder, InlineImage, List, Table, UnsupportedItem],
+    Field(discriminator="type"),
+]
+
+# What a table cell may hold.
+CellItem = Annotated[
+    Union[Paragraph, InlineImage, List, Table],
     Field(discriminator="type"),
 ]
 
@@ -179,6 +238,8 @@ Paragraph.model_rebuild()
 InlineImage.model_rebuild()
 ListItem.model_rebuild()
 UnsupportedItem.model_rebuild()
+TableCell.model_rebuild()
+Table.model_rebuild()
 
 
 class Position(BaseModel):

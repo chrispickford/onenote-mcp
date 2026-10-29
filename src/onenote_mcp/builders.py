@@ -21,7 +21,8 @@ from html.parser import HTMLParser
 
 from onenote_mcp.models import (
     FONT_FAMILY_MAX_LENGTH, FONT_FAMILY_PATTERN, HEX_COLOR_PATTERN,
-    ContentItem, FloatingImage, ImagePlaceholder, InlineImage, List, ListChild, ListItem,
+    LINK_SCHEMES, ContentItem, FloatingImage, ImagePlaceholder, InlineImage, List, ListChild, ListItem,
+    Table, TableCell,
     Outline, PageContent, PageOutline, Paragraph, Position, TextRun, UnsupportedItem,
     UnsupportedPageObject,
 )
@@ -148,8 +149,11 @@ def _wrap_span(text: str, styles: list[str]) -> str:
 
 
 def _run_to_html(run: TextRun) -> str:
-    """Return an HTML string for one TextRun."""
-    return _wrap_span(run.text, _format_declarations(run))
+    """Return an HTML string for one TextRun, wrapped in an anchor when it links."""
+    html = _wrap_span(run.text, _format_declarations(run))
+    if run.link is None:
+        return html
+    return f'<a href="{_html_module.escape(run.link, quote=True)}">{html}</a>'
 
 
 def _paragraph_html(text: str, p: Paragraph) -> str:
@@ -449,7 +453,45 @@ def _item_to_oes(
         return [_inline_image_to_oe(item, cdata_map, cdata_counter)]
     if isinstance(item, List):
         return _list_to_oes(item, cdata_map, cdata_counter)
+    if isinstance(item, Table):
+        return [_table_to_oe(item, cdata_map, cdata_counter)]
     raise ValueError(_UNSUPPORTED_ITEM_ERROR.format(kind=item.kind))
+
+
+def _table_to_oe(
+    table: Table,
+    cdata_map: dict[int, str],
+    cdata_counter: list[int],
+) -> ET.Element:
+    """Return the OE holding a <one:Table> for *table*.
+
+    <one:Columns> is written only with explicit widths; without it OneNote
+    sizes the columns to their content.  An empty cell still gets one empty
+    OE, since the schema requires one.
+    """
+    oe = ET.Element(f"{{{_ONE_NS}}}OE")
+    table_el = ET.SubElement(oe, f"{{{_ONE_NS}}}Table", {
+        "bordersVisible": "true" if table.borders else "false",
+        "hasHeaderRow": "true" if table.header_row else "false",
+    })
+    if table.column_widths is not None:
+        columns_el = ET.SubElement(table_el, f"{{{_ONE_NS}}}Columns")
+        for index, width in enumerate(table.column_widths):
+            ET.SubElement(columns_el, f"{{{_ONE_NS}}}Column", {
+                "index": str(index), "width": str(width), "isLocked": "true",
+            })
+    for row in table.rows:
+        row_el = ET.SubElement(table_el, f"{{{_ONE_NS}}}Row")
+        for cell in row:
+            cell_el = ET.SubElement(row_el, f"{{{_ONE_NS}}}Cell")
+            oes = _items_to_oes(cell.items, cdata_map, cdata_counter)
+            if not oes:
+                empty = ET.Element(f"{{{_ONE_NS}}}OE")
+                ET.SubElement(empty, f"{{{_ONE_NS}}}T").text = ""
+                oes = [empty]
+            ET.SubElement(cell_el, f"{{{_ONE_NS}}}OEChildren").extend(oes)
+    _append_children(oe, _items_to_oes(table.children, cdata_map, cdata_counter))
+    return oe
 
 
 def _items_to_oes(
@@ -677,9 +719,15 @@ class _RunCollector(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         style = dict(self._stack[-1])
+        attr_map = {k: (v or "") for k, v in attrs}
         if tag == "span":
-            attr_map = {k: (v or "") for k, v in attrs}
             style.update(_fmt_from_style(attr_map.get("style", "")))
+        elif tag == "a":
+            # Links with other schemes (file:, ...) read as plain text: the
+            # model only accepts the schemes it can write back safely.
+            href = attr_map.get("href", "")
+            if href.lower().startswith(LINK_SCHEMES):
+                style["link"] = href
         self._stack.append(style)
 
     def handle_startendtag(self, tag, attrs):
@@ -876,7 +924,7 @@ def _parse_paragraph_oe(
 
     if not runs:
         return Paragraph(type="paragraph", text="", style=style, children=children)
-    if len(runs) == 1:
+    if len(runs) == 1 and "link" not in runs[0][1]:
         text, fmt = runs[0]
         return Paragraph(type="paragraph", text=text, style=style, children=children, **fmt)
     segments = [TextRun(text=text, **fmt) for text, fmt in runs]
@@ -928,7 +976,6 @@ def _parse_inline_image(img_el: ET.Element, children: list[ContentItem]) -> Inli
 _UNSUPPORTED_KINDS: dict[str, str] = {
     f"{{{_ONE_NS}}}{name}": kind
     for name, kind in (
-        ("Table", "table"),
         ("InkDrawing", "ink"),
         ("InkParagraph", "ink"),
         ("InkWord", "ink"),
@@ -1121,6 +1168,8 @@ def _list_style(oe_el: ET.Element) -> str | None:
     list_el = oe_el.find(f"{{{_ONE_NS}}}List")
     if list_el is None or oe_el.find(f"{{{_ONE_NS}}}Image") is not None:
         return None
+    if oe_el.find(f"{{{_ONE_NS}}}Table") is not None:
+        return None
     if _unsupported_content(oe_el) is not None:
         return None
     return "bullet" if list_el.find(f"{{{_ONE_NS}}}Bullet") is not None else "numbered"
@@ -1143,8 +1192,11 @@ def _parse_oe(
     else:
         children = _parse_outline_items(_child_oes(el), quick_style_map)
         img_el = el.find(f"{{{_ONE_NS}}}Image")
+        table_el = el.find(f"{{{_ONE_NS}}}Table")
         if _unsupported_content(el) is not None:
             item = _parse_unsupported_oe(el, children)
+        elif table_el is not None:
+            item = _parse_table(table_el, quick_style_map, children)
         elif img_el is not None:
             item = _parse_inline_image(img_el, children)
         else:
@@ -1152,6 +1204,42 @@ def _parse_oe(
     if item is not None:
         item.id = el.get("objectID")
     return item
+
+
+def _parse_table(
+    table_el: ET.Element,
+    quick_style_map: dict[str, ET.Element] | None,
+    children: list[ContentItem],
+) -> Table:
+    """Parse a <one:Table> into a Table; each cell's OEs parse like outline items.
+
+    Column widths are reported only when every column's width is locked (set
+    explicitly, as table writes do); OneNote's automatic widths are left out
+    so the table stays auto-sized when written back.  They are rounded to
+    0.01 pt (OneNote stores floats such as 100.0000076), so a read-write-read
+    round trip is stable.
+    """
+    columns = table_el.find(f"{{{_ONE_NS}}}Columns")
+    column_els = columns.findall(f"{{{_ONE_NS}}}Column") if columns is not None else []
+    widths = (
+        [round(float(col.get("width", "0")), 2) for col in column_els]
+        if column_els and all(col.get("isLocked") == "true" for col in column_els) else None
+    )
+    rows = [
+        [
+            TableCell(items=_parse_outline_items(_child_oes(cell_el), quick_style_map))
+            for cell_el in row_el.findall(f"{{{_ONE_NS}}}Cell")
+        ]
+        for row_el in table_el.findall(f"{{{_ONE_NS}}}Row")
+    ]
+    return Table(
+        type="table",
+        rows=rows,
+        header_row=table_el.get("hasHeaderRow") == "true",
+        column_widths=widths if widths and len(widths) == len(rows[0]) else None,
+        borders=table_el.get("bordersVisible") != "false",
+        children=children,
+    )
 
 
 def _parse_outline_items(
