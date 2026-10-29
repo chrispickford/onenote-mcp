@@ -192,6 +192,19 @@ register them.
 | `replace_page_xml` | Replace a page from a caller-supplied `<one:Page>` document. |
 | `append_page_xml` | Append a single raw XML element (e.g. `<one:Outline>`) to a page. |
 
+## Tables and links
+
+Tables are ordinary items: `{"type": "table", "rows": [[cell, ...], ...], "header_row":
+false, "column_widths": null, "borders": true}`. Each cell is `{"items": [...]}` holding
+paragraphs, lists, inline images or nested tables; a plain string is shorthand for a
+cell with one paragraph. Every row must have the same number of cells, and OneNote has
+no merged cells, so flatten them. Without `column_widths` OneNote sizes the columns to
+their content; `get_page` reports widths only when they were set explicitly.
+
+A text run (`segments` entry) can carry `"link": "https://..."`; `http://`, `https://`,
+`mailto:` and `onenote:` links are accepted. Links with other schemes read back as
+plain text.
+
 ## Page revisions
 
 `get_page` returns a `revision` token for the content it read. Writes that change or
@@ -231,15 +244,14 @@ position. This keeps reads of image-heavy pages small and fast.
 
 ## Content the structured tools cannot write
 
-Tables, handwriting and drawings (ink), attached files, audio/video recordings and
-content from newer OneNote versions have no structured item type. `get_page` still
-reports them, so nothing disappears unnoticed:
+Handwriting and drawings (ink), attached files, audio/video recordings and content
+from newer OneNote versions have no structured item type. `get_page` still reports
+them, so nothing disappears unnoticed:
 
 - Inside an outline, each becomes a read-only item such as
-  `{"type": "unsupported", "kind": "table", "text": "Name | Age\nAda | 36"}`.
-  `kind` is `table`, `ink`, `file`, `media` or `unknown`; `text` is the readable
-  text when OneNote provides it (table cells one row per line, recognized
-  handwriting, a file's name).
+  `{"type": "unsupported", "id": "{...}", "kind": "file", "text": "report.pdf"}`.
+  `kind` is `ink`, `file`, `media` or `unknown`; `text` is the readable text when
+  OneNote provides it (recognized handwriting, a file's name).
 - Objects placed directly on the page canvas, such as handwriting, are listed in
   the top-level `unsupported` list with their kind, position and size.
 
