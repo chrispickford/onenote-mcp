@@ -30,7 +30,7 @@ from collections.abc import Callable
 
 from mcp.server.fastmcp import FastMCP
 
-from onenote_mcp import config, pagestate
+from onenote_mcp import config, pagestate, structure
 from onenote_mcp.hierarchy import parse_notebook_tree
 from onenote_mcp.com import (
     OneNoteError,
@@ -766,6 +766,77 @@ async def set_tag(page_id: str, item_id: str, tag: Tag | None, expected_revision
     """
     try:
         return await asyncio.to_thread(_set_tag_com, page_id, item_id, tag, expected_revision=expected_revision)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def create_notebook(name: str, location: str) -> dict:
+    """Create a new notebook and open it in OneNote.
+
+    name: the notebook's name (no \\ / : * ? " < > |).
+    location: where its files live: an absolute local folder (e.g. "D:\\Notebooks"),
+    or a OneDrive / SharePoint folder URL (e.g. "https://d.docs.live.net/<id>/Documents"
+    or "https://<tenant>-my.sharepoint.com/personal/<user>/Documents/Notebooks").
+    The notebook is created at location/name. Prefer the URL for notebooks that should
+    sync: OneNote notebooks inside a folder synced by the OneDrive app can be damaged.
+    With ONENOTE_ALLOWED_NOTEBOOKS set, the name or path must be listed there.
+
+    Returns {"id", "name", "path"}. Notebooks cannot be deleted through OneNote;
+    close_notebook removes one from OneNote, and its files can then be deleted by hand.
+    """
+    try:
+        return await asyncio.to_thread(structure.create_notebook, name, location)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def open_notebook(location: str) -> dict:
+    """Open an existing notebook from its local folder path or URL. Returns {"id", "name", "path"}."""
+    try:
+        return await asyncio.to_thread(structure.open_notebook, location)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def close_notebook(notebook_id: str, force: bool = False) -> str:
+    """Close a notebook in OneNote. Its files stay where they are (open_notebook reopens it).
+
+    force: close even if OneNote has changes it has not synced yet (they may be lost).
+    Returns "ok".
+    """
+    try:
+        return await asyncio.to_thread(structure.close_notebook, notebook_id, force)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def create_section_group(parent_id: str, name: str) -> dict:
+    """Create a section group in a notebook or in another section group.
+
+    parent_id: a notebook or section group id from get_notebooks. A sibling group
+    with the same name (ignoring case) is refused. Returns {"id", "name"}.
+    """
+    try:
+        return await asyncio.to_thread(structure.create_section_group, parent_id, name)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def create_section(parent_id: str, name: str, color: str | None = None) -> dict:
+    """Create a section in a notebook or section group.
+
+    parent_id: a notebook or section group id from get_notebooks. name: the section
+    name (a trailing ".one" is dropped). color: optional tab colour as "#RRGGBB".
+    A sibling section with the same name (ignoring case) is refused.
+    Returns {"id", "name"}; use the id with create_page.
+    """
+    try:
+        return await asyncio.to_thread(structure.create_section, parent_id, name, color)
     except (OneNoteError, ValueError) as exc:
         raise _fail(exc) from exc
 

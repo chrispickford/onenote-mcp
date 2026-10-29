@@ -154,6 +154,19 @@ tools even though OneNote itself is reachable.
 The intended flow: `get_notebooks` → pick a section → `list_pages(section_id)` →
 pick a page → read/write tools below.
 
+### Notebook structure
+
+| Tool | What it does |
+| --- | --- |
+| `create_notebook` | Create a notebook at `location/name`, where location is a local folder or a OneDrive/SharePoint URL. Prefer the URL for notebooks that sync: notebooks inside a folder the OneDrive app syncs can be damaged. |
+| `open_notebook` | Open an existing notebook from its folder or URL. |
+| `close_notebook` | Close a notebook in OneNote. Notebooks cannot be deleted through OneNote; after closing, delete its files by hand if wanted. |
+| `create_section_group` | Create a section group in a notebook or another section group. |
+| `create_section` | Create a section in a notebook or section group, optionally with a tab colour. |
+
+New notebooks must be allowed by `ONENOTE_ALLOWED_NOTEBOOKS` when it is set (list
+their name or path there first).
+
 ### Reading
 
 | Tool | What it does |
