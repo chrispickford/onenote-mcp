@@ -26,10 +26,11 @@ Copy those handles verbatim into write XML — the server resolves them back to 
 import asyncio
 import os
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 
 from mcp.server.fastmcp import FastMCP
 
+from onenote_mcp import config
 from onenote_mcp.com import (
     OneNoteError,
     allowlist_config_error as _allowlist_config_error_com,
@@ -520,20 +521,8 @@ async def append_page(page_id: str, outline: Outline) -> str:
         raise _fail(exc) from exc
 
 
-def _raw_xml_disabled(environ: Mapping[str, str]) -> bool:
-    """Parse ONENOTE_DISABLE_RAW_XML: '1'/'true' disable the raw-XML tools,
-    unset, empty, '0' or 'false' keep them (case-insensitive)."""
-    raw = environ.get("ONENOTE_DISABLE_RAW_XML", "")
-    value = raw.strip().lower()
-    if value in ("1", "true"):
-        return True
-    if value in ("", "0", "false"):
-        return False
-    raise ValueError(f"ONENOTE_DISABLE_RAW_XML must be 1, true, 0, false or empty, got {raw!r}")
-
-
-def create_server(raw_xml_tools: bool = True) -> FastMCP:
-    """Build the MCP server; with raw_xml_tools=False the four *_xml tools are not registered."""
+def create_server(raw_xml_tools: bool = False) -> FastMCP:
+    """Build the MCP server; the four *_xml tools are registered only with raw_xml_tools=True."""
     server = FastMCP("onenote")
     for fn, is_raw_xml in _TOOLS:
         if raw_xml_tools or not is_raw_xml:
@@ -544,10 +533,10 @@ def create_server(raw_xml_tools: bool = True) -> FastMCP:
 def main() -> None:
     """Entry point for the ``onenote-mcp`` console script (stdio transport)."""
     try:
-        raw_xml_disabled = _raw_xml_disabled(os.environ)
+        raw_xml_tools = config.raw_xml_enabled(os.environ)
     except ValueError as exc:
         sys.exit(f"onenote-mcp: {exc}")
-    create_server(raw_xml_tools=not raw_xml_disabled).run()
+    create_server(raw_xml_tools=raw_xml_tools).run()
 
 
 if __name__ == "__main__":

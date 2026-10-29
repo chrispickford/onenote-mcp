@@ -509,8 +509,28 @@ def _allowed_notebooks() -> set[str] | None:
     return {part.strip() for part in raw.split(",") if part.strip()}
 
 
+def _normalized_location(value: str) -> str:
+    """Return a notebook path or URL in the form allowlist entries are compared in:
+    lower case, without trailing slashes or backslashes."""
+    return value.strip().rstrip("\\/").lower()
+
+
+def _notebook_allowed(nb_el: ET.Element, allowed: set[str]) -> bool:
+    """Whether *nb_el* matches an allowlist entry by ID, name, nickname or path.
+
+    IDs and names match exactly; a path or URL matches ignoring case and a
+    trailing separator.
+    """
+    if any(nb_el.get(attr) in allowed for attr in ("ID", "name", "nickname")):
+        return True
+    path = nb_el.get("path")
+    if not path:
+        return False
+    return _normalized_location(path) in {_normalized_location(entry) for entry in allowed}
+
+
 def _filter_notebooks_xml(xml: str) -> str:
-    """Drop <one:Notebook> elements whose name is not allowlisted.
+    """Drop <one:Notebook> elements that match no allowlist entry.
 
     Applied to hierarchy listings so restricted notebooks are simply invisible.
     No-op when no allowlist is configured.
@@ -520,7 +540,7 @@ def _filter_notebooks_xml(xml: str) -> str:
         return xml
     root = ET.fromstring(xml)
     for nb_el in list(root.findall(f"{{{_ONE_NS}}}Notebook")):
-        if nb_el.get("name") not in allowed:
+        if not _notebook_allowed(nb_el, allowed):
             root.remove(nb_el)
     return ET.tostring(root, encoding="unicode", xml_declaration=False)
 
@@ -549,7 +569,7 @@ def _ensure_allowed(app, object_id: str, kind: str) -> None:
     cur = target
     while cur is not None and cur.tag != nb_tag:
         cur = parent_of.get(cur)
-    if cur is None or cur.get("name") not in allowed:
+    if cur is None or not _notebook_allowed(cur, allowed):
         raise OneNoteError(
             f"{kind} {object_id!r} is not in an allowed notebook — access is "
             "restricted by ONENOTE_ALLOWED_NOTEBOOKS.",

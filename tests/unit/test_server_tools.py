@@ -1,5 +1,5 @@
-"""Unit tests for the registered tools: which tools ONENOTE_DISABLE_RAW_XML
-leaves, their generated schemas, and how the structured tools handle content
+"""Unit tests for the registered tools: which tools the raw-XML settings
+leave, their generated schemas, and how the structured tools handle content
 they cannot write.
 
 Builds the server in-process the way main() does; no OneNote and no stdio
@@ -11,7 +11,7 @@ import pytest
 
 try:
     from mcp.server.fastmcp.exceptions import ToolError
-    from onenote_mcp import server
+    from onenote_mcp import config, server
     _COM_AVAILABLE = True
 except Exception:
     _COM_AVAILABLE = False
@@ -29,39 +29,42 @@ _STRUCTURED_TOOLS = {
 
 
 def _tool_names(environ: dict[str, str]) -> set[str]:
-    raw_xml_disabled = server._raw_xml_disabled(environ)
-    tools = asyncio.run(server.create_server(raw_xml_tools=not raw_xml_disabled).list_tools())
+    tools = asyncio.run(server.create_server(raw_xml_tools=config.raw_xml_enabled(environ)).list_tools())
     return {tool.name for tool in tools}
 
 
 @pytest.mark.parametrize("environ", [
     {},
-    {"ONENOTE_DISABLE_RAW_XML": ""},
-    {"ONENOTE_DISABLE_RAW_XML": " "},
-    {"ONENOTE_DISABLE_RAW_XML": "0"},
-    {"ONENOTE_DISABLE_RAW_XML": "false"},
-    {"ONENOTE_DISABLE_RAW_XML": "FALSE"},
+    {"ONENOTE_ENABLE_RAW_XML": ""},
+    {"ONENOTE_ENABLE_RAW_XML": "0"},
+    {"ONENOTE_DISABLE_RAW_XML": "1"},
+    {"ONENOTE_ENABLE_RAW_XML": "1", "ONENOTE_DISABLE_RAW_XML": "true"},
 ])
-def test_all_13_tools_unless_disabled(environ):
+def test_raw_xml_tools_off_by_default_and_when_disabled(environ):
     names = _tool_names(environ)
-    assert names == _STRUCTURED_TOOLS | _RAW_XML_TOOLS
-    assert len(names) == 13
+    assert _STRUCTURED_TOOLS <= names
+    assert not names & _RAW_XML_TOOLS
 
 
 @pytest.mark.parametrize("value", ["1", "true", "TRUE", "True", " true "])
-def test_raw_xml_tools_not_registered_when_disabled(value):
-    names = _tool_names({"ONENOTE_DISABLE_RAW_XML": value})
-    assert names == _STRUCTURED_TOOLS
-    assert len(names) == 9
+def test_raw_xml_tools_registered_when_enabled(value):
+    names = _tool_names({"ONENOTE_ENABLE_RAW_XML": value})
+    assert _STRUCTURED_TOOLS | _RAW_XML_TOOLS <= names
 
 
+def test_create_server_default_has_no_raw_xml_tools():
+    tools = asyncio.run(server.create_server().list_tools())
+    assert not {tool.name for tool in tools} & _RAW_XML_TOOLS
+
+
+@pytest.mark.parametrize("name", ["ONENOTE_DISABLE_RAW_XML", "ONENOTE_ENABLE_RAW_XML"])
 @pytest.mark.parametrize("value", ["yes", "2", "off", "disabled"])
-def test_invalid_value_refuses_to_start(monkeypatch, value):
-    monkeypatch.setenv("ONENOTE_DISABLE_RAW_XML", value)
+def test_invalid_value_refuses_to_start(monkeypatch, name, value):
+    monkeypatch.setenv(name, value)
     with pytest.raises(SystemExit) as exc:
         server.main()
     message = str(exc.value.code)
-    assert "ONENOTE_DISABLE_RAW_XML" in message
+    assert name in message
     assert repr(value) in message
 
 
@@ -106,7 +109,7 @@ def test_only_the_structured_replace_keeps_unsupported_page_objects(monkeypatch)
     asyncio.run(server.create_server().call_tool(
         "replace_page", {"page_id": "p", "title": "t", "outlines": []},
     ))
-    asyncio.run(server.create_server().call_tool(
+    asyncio.run(server.create_server(raw_xml_tools=True).call_tool(
         "replace_page_xml", {"page_id": "p", "page_xml": page_xml},
     ))
     structured, raw = calls

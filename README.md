@@ -179,8 +179,9 @@ pick a page → read/write tools below.
 ### Raw-XML escape hatches
 
 Prefer the structured tools above; these exist for direct schema control and debugging.
-They cost significantly more tokens because of the XML overhead. Set
-[`ONENOTE_DISABLE_RAW_XML`](#configuration) to `1` to remove them from the server.
+They cost significantly more tokens because of the XML overhead, and they are
+**off by default**: set [`ONENOTE_ENABLE_RAW_XML`](#configuration) to `1` to
+register them.
 
 | Tool | What it does |
 | --- | --- |
@@ -243,12 +244,13 @@ the Claude Desktop server entry if needed):
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `ONENOTE_ALLOWED_NOTEBOOKS` | _(unset: no restriction)_ | Comma-separated notebook names, e.g. `SharedNotebook, Project Notes`. When set, all other notebooks are invisible and untouchable: they are hidden from notebook listings and every read/write against their sections or pages is rejected. An empty value allows no notebook. A value that still contains `${` (a placeholder the client did not expand) is a configuration error: notebook tools fail with `config_error` and `ping` reports it. |
+| `ONENOTE_ALLOWED_NOTEBOOKS` | _(unset: no restriction)_ | Comma-separated notebooks, e.g. `SharedNotebook, Project Notes`. Each entry matches a notebook's name or display name (exactly), its ID, or its path or URL (ignoring case and a trailing slash). When set, all other notebooks are invisible and untouchable: they are hidden from notebook listings and every read/write against their sections or pages is rejected. An empty value allows no notebook. A value that still contains `${` (a placeholder the client did not expand) is a configuration error: notebook tools fail with `config_error` and `ping` reports it. |
 | `ONENOTE_READ_TIMEOUT` | `20` | Timeout (s) for page/hierarchy reads and image fetches. |
 | `ONENOTE_WRITE_TIMEOUT` | `25` | Timeout (s) for page creates and writes. |
 | `ONENOTE_PING_TIMEOUT` | `8` | Timeout (s) for the `ping` health probe. |
 | `ONENOTE_IMAGE_CACHE_MB` | `200` | In-memory cap for cached image bytes; least-recently-used entries are evicted beyond it. |
-| `ONENOTE_DISABLE_RAW_XML` | _(unset: raw-XML tools on)_ | `1` or `true` (any case): the four raw-XML tools (`list_hierarchy_xml`, `get_page_xml`, `replace_page_xml`, `append_page_xml`) are not registered and do not appear in the tool list. Unset, empty, `0` or `false`: all tools are available. Any other value stops the server at startup with an error. Read once at startup. |
+| `ONENOTE_ENABLE_RAW_XML` | _(unset: raw-XML tools off)_ | `1` or `true` (any case): the four raw-XML tools (`list_hierarchy_xml`, `get_page_xml`, `replace_page_xml`, `append_page_xml`) are registered. Unset, empty, `0` or `false`: they are not. Any other value stops the server at startup with an error. Read once at startup. |
+| `ONENOTE_DISABLE_RAW_XML` | _(unset)_ | The upstream setting, still honoured: `1` or `true` keeps the raw-XML tools off even when `ONENOTE_ENABLE_RAW_XML` is set. Same accepted values. |
 
 ## Standalone executable details
 
