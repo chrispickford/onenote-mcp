@@ -1,9 +1,9 @@
 """Smoke-test a built onenote-mcp.exe over MCP stdio.
 
 Starts the exe twice. The default start runs initialize and tools/list, checks
-that the exe exposes exactly the tools of the installed source package, and
-calls ping. A second start with ONENOTE_DISABLE_RAW_XML=1 must expose exactly
-the 9 tools without the raw-XML escape hatches. With --require-onenote the
+that the exe exposes exactly the default tools of the installed source package
+(no raw-XML escape hatches), and calls ping. A second start with
+ONENOTE_ENABLE_RAW_XML=1 must expose those plus the four raw-XML tools. With --require-onenote the
 default start also requires a live OneNote: ping must report
 onenote_responsive and get_notebooks must succeed. Exits non-zero on a failed
 check, a timeout, or a Python traceback on the server's stderr.
@@ -26,8 +26,8 @@ from mcp.types import CallToolResult
 from onenote_mcp.server import create_server
 
 TIMEOUT_S = 90
-RESTRICTED_ENV = {"ONENOTE_DISABLE_RAW_XML": "1"}
-RESTRICTED_TOOL_COUNT = 9
+RAW_XML_ENV = {"ONENOTE_ENABLE_RAW_XML": "1"}
+RAW_XML_TOOLS = {"list_hierarchy_xml", "get_page_xml", "replace_page_xml", "append_page_xml"}
 
 
 class SmokeTestError(Exception):
@@ -85,14 +85,15 @@ async def _query(exe: Path, env: dict[str, str] | None, tool_calls: list[str], e
 async def _query_both(exe: Path, require_onenote: bool, errlog) -> tuple[dict, dict]:
     calls = ["ping", "get_notebooks"] if require_onenote else ["ping"]
     default = await _query(exe, None, calls, errlog)
-    restricted = await _query(exe, RESTRICTED_ENV, [], errlog)
-    return default, restricted
+    with_raw_xml = await _query(exe, RAW_XML_ENV, [], errlog)
+    return default, with_raw_xml
 
 
-def _check(default: dict, restricted: dict, require_onenote: bool) -> None:
+def _check(default: dict, with_raw_xml: dict, require_onenote: bool) -> None:
     print(f"initialize: answered after {default['startup_s']:.1f}s")
 
-    _require_tools(default["tools"], asyncio.run(_source_tool_names(True)), "default start")
+    _require_tools(default["tools"], asyncio.run(_source_tool_names(False)), "default start")
+    _require(not default["tools"] & RAW_XML_TOOLS, "default start exposes raw-XML tools")
     print(f"tools/list: {len(default['tools'])} tools match the source package")
 
     ping = _payload(default["ping"], "ping")
@@ -105,13 +106,10 @@ def _check(default: dict, restricted: dict, require_onenote: bool) -> None:
         _require(isinstance(notebooks, list), f"get_notebooks returned {notebooks!r}")
         print(f"get_notebooks: {[nb['name'] for nb in notebooks]}")
 
-    restricted_tools = restricted["tools"]
-    _require_tools(restricted_tools, asyncio.run(_source_tool_names(False)), "ONENOTE_DISABLE_RAW_XML=1")
-    _require(
-        len(restricted_tools) == RESTRICTED_TOOL_COUNT,
-        f"ONENOTE_DISABLE_RAW_XML=1: expected {RESTRICTED_TOOL_COUNT} tools, got {len(restricted_tools)}",
-    )
-    print(f"tools/list with ONENOTE_DISABLE_RAW_XML=1: {len(restricted_tools)} tools match the source package")
+    raw_tools = with_raw_xml["tools"]
+    _require_tools(raw_tools, asyncio.run(_source_tool_names(True)), "ONENOTE_ENABLE_RAW_XML=1")
+    _require(raw_tools - default["tools"] == RAW_XML_TOOLS, "ONENOTE_ENABLE_RAW_XML=1 must add exactly the raw-XML tools")
+    print(f"tools/list with ONENOTE_ENABLE_RAW_XML=1: {len(raw_tools)} tools match the source package")
 
 
 def main() -> int:
@@ -129,10 +127,10 @@ def main() -> int:
     with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as errlog:
         failure = None
         try:
-            default, restricted = asyncio.run(
+            default, with_raw_xml = asyncio.run(
                 asyncio.wait_for(_query_both(args.exe, args.require_onenote, errlog), TIMEOUT_S)
             )
-            _check(default, restricted, args.require_onenote)
+            _check(default, with_raw_xml, args.require_onenote)
         except asyncio.TimeoutError:
             failure = f"timed out after {TIMEOUT_S}s"
         except SmokeTestError as exc:

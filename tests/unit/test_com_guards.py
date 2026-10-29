@@ -147,6 +147,49 @@ def test_filter_notebooks_empty_allowlist_hides_all(monkeypatch):
     assert root.findall(f"{{{_ONE_NS}}}Notebook") == []
 
 
+_PATHS_XML = (
+    f'<one:Notebooks xmlns:one="{_ONE_NS}">'
+    '<one:Notebook ID="{NB-1}{1}{B0}" name="Folder" nickname="Shown Name"'
+    ' path="https://d.docs.live.net/abc/test/Folder/"/>'
+    '<one:Notebook ID="{NB-2}{1}{B0}" name="Other" path="D:\\Notebooks\\Other"/>'
+    '</one:Notebooks>'
+)
+
+
+def _visible(xml: str) -> list[str]:
+    return [nb.get("name") for nb in ET.fromstring(_filter_notebooks_xml(xml)).findall(f"{{{_ONE_NS}}}Notebook")]
+
+
+def test_allowlist_matches_notebook_id(monkeypatch):
+    monkeypatch.setenv("ONENOTE_ALLOWED_NOTEBOOKS", "{NB-2}{1}{B0}")
+    assert _visible(_PATHS_XML) == ["Other"]
+
+
+def test_allowlist_matches_path_case_insensitive(monkeypatch):
+    monkeypatch.setenv("ONENOTE_ALLOWED_NOTEBOOKS", "d:\\notebooks\\other\\")
+    assert _visible(_PATHS_XML) == ["Other"]
+
+
+def test_allowlist_matches_url_without_trailing_slash(monkeypatch):
+    monkeypatch.setenv("ONENOTE_ALLOWED_NOTEBOOKS", "https://d.docs.live.net/abc/test/Folder")
+    assert _visible(_PATHS_XML) == ["Folder"]
+
+
+def test_allowlist_matches_nickname(monkeypatch):
+    monkeypatch.setenv("ONENOTE_ALLOWED_NOTEBOOKS", "Shown Name")
+    assert _visible(_PATHS_XML) == ["Folder"]
+
+
+def test_allowlist_still_matches_name(monkeypatch):
+    monkeypatch.setenv("ONENOTE_ALLOWED_NOTEBOOKS", "Folder")
+    assert _visible(_PATHS_XML) == ["Folder"]
+
+
+def test_allowlist_name_match_is_exact(monkeypatch):
+    monkeypatch.setenv("ONENOTE_ALLOWED_NOTEBOOKS", "folder")
+    assert _visible(_PATHS_XML) == []
+
+
 def test_filter_notebooks_placeholder_raises_config_error(monkeypatch):
     monkeypatch.setenv("ONENOTE_ALLOWED_NOTEBOOKS", "${user_config.allowed_notebooks}")
     with pytest.raises(OneNoteError) as exc:

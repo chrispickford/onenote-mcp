@@ -1,5 +1,12 @@
-"""Shared fixtures for E2E tests — all require OneNote desktop running."""
+"""Shared fixtures for E2E tests — all require OneNote desktop running.
+
+Every e2e test, in-process or through the spawned server, is restricted to the
+ClaudeSpike notebook by the allowlist set below, so a test can never write to
+a real notebook.
+"""
+import os
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -12,6 +19,16 @@ from tests.e2e.mcp_client import mcp_session  # noqa: F401 — re-export for all
 
 _ONE_NS = "http://schemas.microsoft.com/office/onenote/2013/onenote"
 _NS = {"one": _ONE_NS}
+
+TEST_NOTEBOOK = "ClaudeSpike"
+os.environ["ONENOTE_ALLOWED_NOTEBOOKS"] = TEST_NOTEBOOK
+# The raw XML tools are off by default; their e2e tests need them.
+os.environ["ONENOTE_ENABLE_RAW_XML"] = "1"
+# Tests insert files from pytest's temporary folders and the test files folder.
+TEST_FILES = r"D:\scratch\onenote-mcp-tests\files"
+os.environ["ONENOTE_FILE_ROOTS"] = f"{tempfile.gettempdir()};{TEST_FILES}"
+# Backups of test pages stay next to the test notebook, not in %LOCALAPPDATA%.
+os.environ["ONENOTE_BACKUP_DIR"] = r"D:\scratch\onenote-mcp-tests\backups"
 
 # ---------------------------------------------------------------------------
 # OneNote availability check (done once at session start)
@@ -46,21 +63,15 @@ def onenote_available():
 def claudespike_section_id(onenote_available):
     """Return the ID of the first section in the ClaudeSpike notebook.
 
-    Falls back to the first section of the first notebook if ClaudeSpike is absent.
+    Skips when ClaudeSpike is not open; never falls back to another notebook.
+    Creates a "Tests" section when the notebook has none.
     """
-    xml = com.list_hierarchy()
-    root = ET.fromstring(xml)
-
-    # Try ClaudeSpike first
-    for nb in root.findall(f"{{{_ONE_NS}}}Notebook"):
-        if nb.get("name") == "ClaudeSpike":
-            sections = nb.findall(f".//{{{_ONE_NS}}}Section")
-            if sections:
-                return sections[0].get("ID")
-
-    # Fall back to first notebook / first section
-    nb = root.findall(f"{{{_ONE_NS}}}Notebook")[0]
+    root = ET.fromstring(com.list_hierarchy())
+    nb = next((nb for nb in root.findall(f"{{{_ONE_NS}}}Notebook") if nb.get("name") == TEST_NOTEBOOK), None)
+    if nb is None:
+        pytest.skip(f"{TEST_NOTEBOOK} notebook not open")
     sections = nb.findall(f".//{{{_ONE_NS}}}Section")
-    if not sections:
-        pytest.skip("No sections found in any notebook.")
-    return sections[0].get("ID")
+    if sections:
+        return sections[0].get("ID")
+    # OpenHierarchy(path, relative_to_id, cftSection=3) creates the section.
+    return com._run_com(lambda: com._app().OpenHierarchy("Tests.one", nb.get("ID"), 3))

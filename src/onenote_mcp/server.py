@@ -26,10 +26,12 @@ Copy those handles verbatim into write XML — the server resolves them back to 
 import asyncio
 import os
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 
 from mcp.server.fastmcp import FastMCP
 
+from onenote_mcp import config, pagestate, structure
+from onenote_mcp.hierarchy import parse_notebook_tree
 from onenote_mcp.com import (
     OneNoteError,
     allowlist_config_error as _allowlist_config_error_com,
@@ -43,11 +45,20 @@ from onenote_mcp.com import (
     create_page as _create_page_com,
     replace_page as _replace_page_com,
     append_page as _append_page_com,
+    list_backups as _list_backups_com,
+    restore_page as _restore_page_com,
+    update_item as _update_item_com,
+    insert_items as _insert_items_com,
+    delete_items as _delete_items_com,
+    move_item as _move_item_com,
+    replace_text as _replace_text_com,
+    rename_page as _rename_page_com,
+    set_tag as _set_tag_com,
 )
-from onenote_mcp.models import FloatingImage, Outline, PageContent
+from onenote_mcp.models import FloatingImage, ListChild, Outline, PageContent, Tag
 from onenote_mcp.builders import (
     UNSUPPORTED_PAGE_OBJECT_TAGS,
-    build_page_xml, build_append_xml, parse_notebook_skeleton, parse_section_pages, parse_page,
+    build_page_xml, build_append_xml, parse_section_pages, parse_page,
 )
 
 # Tool functions in definition order; create_server registers them.
@@ -87,7 +98,8 @@ async def ping() -> dict:
     apart from "the server is down".
 
     Returns:
-      {"server": "ok", "onenote_responsive": true|false, "config_error": null|"<message>"}
+      {"server": "ok", "onenote_responsive": true|false, "config_error": null|"<message>",
+       "writes_in_flight": [page ids]}
 
     onenote_responsive is false when OneNote does not answer a lightweight call
     within the ping timeout (it is likely showing a modal dialog or syncing).
@@ -98,12 +110,17 @@ async def ping() -> dict:
     unexpanded ${...} placeholder in ONENOTE_ALLOWED_NOTEBOOKS.  OneNote can
     still be responsive, but the notebook tools fail with config_error until the
     configuration is fixed.  Show the message to the user.
+
+    writes_in_flight lists pages whose earlier write timed out but is still
+    running in OneNote; writes to those pages fail with 'busy' until it ends
+    (or ONENOTE_ABANDON_WRITE_AFTER seconds pass).
     """
     responsive = await asyncio.to_thread(_ping_com)
     return {
         "server": "ok",
         "onenote_responsive": responsive,
         "config_error": _allowlist_config_error_com(),
+        "writes_in_flight": pagestate.writes_in_flight(),
     }
 
 
@@ -147,7 +164,7 @@ async def get_image_data(handle: str) -> str:
 
 @_tool()
 async def get_notebooks() -> list[dict]:
-    """Return open notebooks and their sections (no pages) — the navigation skeleton.
+    """Return open notebooks with their section groups and sections (no pages): the navigation skeleton.
 
     This is the first step for navigating to content. It is deliberately small:
     it returns every notebook with its sections but NO pages, so you can locate
@@ -159,10 +176,19 @@ async def get_notebooks() -> list[dict]:
         "id": "<notebook-id>",
         "name": "Notebook Name",
         "sections": [
-          {"id": "<section-id>", "name": "Section Name"}
+          {"id": "<section-id>", "name": "Section Name", "color": "#RRGGBB"}
+        ],
+        "section_groups": [
+          {"id": "<group-id>", "name": "Group Name",
+           "sections": [...], "section_groups": [...]}
         ]
       }
     ]
+
+    A notebook's (or group's) "sections" lists only the sections directly in
+    it; sections inside a section group appear under that group, so walking the
+    tree lists each section once. "section_groups" is omitted when there are
+    none. OneNote's recycle bin is not listed.
 
     Workflow:
       1. get_notebooks() — find the section you want (e.g. "Templates") and its id.
@@ -176,7 +202,7 @@ async def get_notebooks() -> list[dict]:
     """
     try:
         xml = await asyncio.to_thread(_list_sections_com)
-        return parse_notebook_skeleton(xml)
+        return parse_notebook_tree(xml)
     except (OneNoteError, ValueError) as exc:
         raise _fail(exc) from exc
 
@@ -251,7 +277,9 @@ async def get_page(page_id: str, include_binary: bool = False) -> dict:
               {"type": "paragraph", "text": "Indented under Parent"}]},
             {"type": "list", "style": "bullet", "items": [{"text": "Item 1"}]},
             {"type": "inline_image", "handle": "mcpref:abc...", "width": 300.0, "height": 200.0},
-            {"type": "unsupported", "kind": "table", "text": "Name | Age\\nAda | 36"}
+            {"type": "table", "rows": [[{"items": [{"type": "paragraph", "text": "Name"}]}]]},
+            {"type": "attachment", "id": "{...}", "name": "report.pdf"},
+            {"type": "unsupported", "id": "{...}", "kind": "ink", "text": "recognised words"}
           ]
         }
       ],
@@ -280,27 +308,37 @@ async def get_page(page_id: str, include_binary: bool = False) -> dict:
     Pass content["images"] verbatim to replace_page's `images` parameter to
     preserve them when rewriting a page (omit it if absent).
 
-    UNSUPPORTED CONTENT: tables, handwriting and drawings (ink), attached
-    files, audio/video recordings and content from newer OneNote versions
-    cannot be written by the structured tools. Inside outlines they appear as
-    read-only {"type": "unsupported", "kind": ..., "text": ...} items; "kind"
-    is table, ink, file, media or unknown, and "text" holds their readable
-    text when OneNote provides it (table cells one row per line, separated by
-    " | "; recognized handwriting; a file's name). replace_page and
-    append_page reject a payload that still contains such an item, because
-    rewriting the page would delete that content: remove the item from the
-    payload deliberately only if deleting it is intended. Objects placed
-    directly on the canvas (e.g. handwriting) are listed in the top-level
-    `unsupported` list instead. replace_page keeps them in place at their
-    position, so place new content where it does not overlap them.
+    TABLES are ordinary "table" items and can be written back. ATTACHMENTS read
+    back as {"type": "attachment", "id", "name"}; they cannot be re-created
+    from that, so a payload that still holds one is rejected.
+
+    UNSUPPORTED CONTENT: handwriting and drawings (ink), audio/video recordings
+    and content from newer OneNote versions cannot be written by the structured
+    tools. Inside outlines they appear as read-only {"type": "unsupported",
+    "id", "kind", "text"} items; "kind" is ink, media or unknown, and "text"
+    holds their readable text when OneNote provides it (recognized
+    handwriting, a recording's name). replace_page rejects a payload that still
+    contains such an item, and refuses a page that holds such items or
+    attachments unless each id is listed in remove_ids (deleting them on
+    purpose); to keep them, use the targeted edit tools instead. Objects placed
+    directly on the canvas (e.g. handwriting, files) are listed in the
+    top-level `unsupported` list instead. replace_page keeps them in place at
+    their position, so place new content where it does not overlap them.
 
     The returned structure is directly compatible with replace_page — you can read a
     page, modify its outlines, and pass outlines + images straight to replace_page.
     Unsupported content is the exception, see above.
+
+    REVISION: "revision" identifies the content as read. replace_page refuses with
+    'conflict' if the page changed since (e.g. the user edited it in OneNote);
+    re-read and retry then. The server remembers the last read revision per page,
+    so passing it back as expected_revision is optional.
     """
     try:
         xml = await asyncio.to_thread(_get_page_com, page_id, include_binary)
-        return parse_page(xml).model_dump(exclude_defaults=True)
+        content = parse_page(xml)
+        content.revision = pagestate.remembered(page_id)
+        return content.model_dump(exclude_defaults=True)
     except (OneNoteError, ValueError) as exc:
         raise _fail(exc) from exc
 
@@ -348,13 +386,24 @@ async def create_page(section_id: str, title: str, parent_page_id: str | None = 
 
 
 @_tool(raw_xml=True)
-async def replace_page_xml(page_id: str, page_xml: str) -> str:
+async def replace_page_xml(
+    page_id: str,
+    page_xml: str,
+    expected_revision: str | None = None,
+    remove_ids: list[str] | None = None,
+) -> str:
     """Advanced / escape-hatch only. Prefer replace_page (typed slim tool) unless you
     need direct XML control or are debugging a OneNote schema issue.
 
-    Replace the full content of a OneNote page.
+    Replace the full content of a OneNote page. Same protections as replace_page:
+    the page is backed up first, objects in get_page's top-level `unsupported`
+    list stay in place, and unsupported items inside outlines must be listed in
+    remove_ids or the replace is refused.
 
     page_id: ID attribute of the target page (from list_pages or create_page).
+    expected_revision: optional. The page must still have this revision (from get_page),
+              else 'conflict'. Omitted: the revision of this session's last get_page of
+              the page is used; a page never read is refused with bad_request.
     page_xml: a COMPLETE <one:Page> document — not a fragment. The ID attribute
               on the root element is overwritten automatically to match page_id.
 
@@ -403,20 +452,25 @@ async def replace_page_xml(page_id: str, page_xml: str) -> str:
     content sits.
     """
     try:
-        await asyncio.to_thread(_replace_page_com, page_id, page_xml)
+        await asyncio.to_thread(
+            _replace_page_com, page_id, page_xml, UNSUPPORTED_PAGE_OBJECT_TAGS,
+            expected_revision=expected_revision, remove_ids=frozenset(remove_ids or ()),
+        )
         return "ok"
     except OneNoteError as exc:
         raise _fail(exc) from exc
 
 
 @_tool(raw_xml=True)
-async def append_page_xml(page_id: str, content_xml: str) -> str:
+async def append_page_xml(page_id: str, content_xml: str, expected_revision: str | None = None) -> str:
     """Advanced / escape-hatch only. Prefer append_page (typed slim tool) unless you
     need direct XML control or are debugging a OneNote schema issue.
 
     Append a single content element to an existing OneNote page.
 
     page_id: ID attribute of the target page (from list_pages or create_page).
+    expected_revision: optional. When given, the page must still have this revision
+              (from get_page), else 'conflict'. Appending needs no prior read.
     content_xml: a SINGLE formally correct OneNote XML element — NOT a full
                  <one:Page> document. The xmlns:one declaration MUST appear on
                  the element itself.
@@ -440,19 +494,29 @@ async def append_page_xml(page_id: str, content_xml: str) -> str:
     Returns "ok" on success.
     """
     try:
-        await asyncio.to_thread(_append_page_com, page_id, content_xml)
+        await asyncio.to_thread(_append_page_com, page_id, content_xml, expected_revision=expected_revision)
         return "ok"
     except OneNoteError as exc:
         raise _fail(exc) from exc
 
 
 @_tool()
-async def replace_page(page_id: str, title: str, outlines: list[Outline], images: list[FloatingImage] | None = None) -> str:
+async def replace_page(
+    page_id: str,
+    title: str,
+    outlines: list[Outline],
+    images: list[FloatingImage] | None = None,
+    expected_revision: str | None = None,
+    remove_ids: list[str] | None = None,
+) -> str:
     """Replace the full content of a OneNote page using structured typed content.
 
     Prefer this over replace_page_xml unless you need direct XML control.
 
     page_id: the page ID from list_pages or create_page.
+    expected_revision: optional. The page must still have this revision (from get_page),
+              else 'conflict'. Omitted: the revision of this session's last get_page of
+              the page is used; a page never read is refused with bad_request.
     title:   new page title — required and replaces the existing title.
     outlines: list of Outline objects that define the page canvas layout.
               Each Outline is an independently positioned block. Items within
@@ -483,26 +547,36 @@ async def replace_page(page_id: str, title: str, outlines: list[Outline], images
             None if the page has no floating images.
 
     Returns "ok" on success.
-    Note: all existing page content is deleted before the new content is written,
-    except the objects in get_page's top-level `unsupported` list (e.g.
+    Note: the new content is written first, then all old page content is
+    deleted, except the objects in get_page's top-level `unsupported` list (e.g.
     handwriting on the canvas): they stay in place at their position, so place
-    new content where it does not overlap them.
+    new content where it does not overlap them. The page is backed up first
+    (see list_backups / restore_page).
+    remove_ids: IDs of 'unsupported' items inside outlines (attachments,
+              handwriting, recordings) that rewriting may delete. A page holding
+              such items is refused with bad_request unless every one is listed;
+              to keep them, change the other content with targeted edits instead.
     """
     try:
         page_xml = build_page_xml(title, outlines, images)
-        await asyncio.to_thread(_replace_page_com, page_id, page_xml, UNSUPPORTED_PAGE_OBJECT_TAGS)
+        await asyncio.to_thread(
+            _replace_page_com, page_id, page_xml, UNSUPPORTED_PAGE_OBJECT_TAGS,
+            expected_revision=expected_revision, remove_ids=frozenset(remove_ids or ()),
+        )
         return "ok"
     except (OneNoteError, ValueError) as exc:
         raise _fail(exc) from exc
 
 
 @_tool()
-async def append_page(page_id: str, outline: Outline) -> str:
+async def append_page(page_id: str, outline: Outline, expected_revision: str | None = None) -> str:
     """Append a structured content block to an existing OneNote page.
 
     Prefer this over append_page_xml unless you need direct XML control.
 
     page_id: the page ID from list_pages or create_page.
+    expected_revision: optional. When given, the page must still have this revision
+              (from get_page), else 'conflict'. Appending needs no prior read.
     outline: a single Outline object containing the content to append.
              Existing page content is preserved.
              Outline items may be paragraph, list, image, or image_placeholder
@@ -514,26 +588,434 @@ async def append_page(page_id: str, outline: Outline) -> str:
     """
     try:
         page_xml = build_append_xml(outline)
-        await asyncio.to_thread(_append_page_com, page_id, page_xml)
+        await asyncio.to_thread(_append_page_com, page_id, page_xml, expected_revision=expected_revision)
         return "ok"
     except (OneNoteError, ValueError) as exc:
         raise _fail(exc) from exc
 
 
-def _raw_xml_disabled(environ: Mapping[str, str]) -> bool:
-    """Parse ONENOTE_DISABLE_RAW_XML: '1'/'true' disable the raw-XML tools,
-    unset, empty, '0' or 'false' keep them (case-insensitive)."""
-    raw = environ.get("ONENOTE_DISABLE_RAW_XML", "")
-    value = raw.strip().lower()
-    if value in ("1", "true"):
-        return True
-    if value in ("", "0", "false"):
-        return False
-    raise ValueError(f"ONENOTE_DISABLE_RAW_XML must be 1, true, 0, false or empty, got {raw!r}")
+@_tool()
+async def update_item(
+    page_id: str,
+    item_id: str,
+    item: ListChild,
+    expected_revision: str | None = None,
+) -> dict:
+    """Replace one item on a page with new content, leaving everything else unchanged.
+
+    page_id: the page. item_id: the "id" of a paragraph, list item, image, table or
+    attachment from get_page. item: the new content, in the replace_page item schema
+    (paragraph, list, table, inline_image, image_placeholder, attachment), or a plain
+    list item ({"text": ..., "tag": ...} without "type") to replace a list item while
+    keeping its list style. Include "children" to keep content indented under it: the
+    item's children are replaced too. A single new item keeps item_id.
+    Attachments and other read-only items cannot be changed, only moved or deleted.
+    expected_revision: as in replace_page; the page must have been read with get_page.
+
+    Targeted edits change only the outline holding the item: the rest of the page,
+    and every other item's id, stay as they are. The page is backed up first (see
+    list_backups). An outline that holds handwriting or recordings cannot be edited this
+    way (it would lose them); attachments are kept.
+
+    Returns {"ok": true, "revision": "<new revision or null>", "ids": [objectIDs of
+    the items that are new on the page]}.
+    """
+    try:
+        return await asyncio.to_thread(_update_item_com, page_id, item_id, item, expected_revision=expected_revision)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
 
 
-def create_server(raw_xml_tools: bool = True) -> FastMCP:
-    """Build the MCP server; with raw_xml_tools=False the four *_xml tools are not registered."""
+@_tool()
+async def insert_items(
+    page_id: str,
+    items: list[ListChild],
+    before_id: str | None = None,
+    after_id: str | None = None,
+    outline_id: str | None = None,
+    at_end: bool = True,
+    expected_revision: str | None = None,
+) -> dict:
+    """Insert new items into a page without rewriting it.
+
+    Give exactly one anchor: before_id or after_id (an item "id" from get_page; the new
+    items go at the same indentation level), or outline_id (an outline "id"; at_end
+    true appends, false prepends). items use the replace_page item schema; plain list
+    items ({"text": ...} without "type") take the list style of the anchor item.
+    Needs no prior read; expected_revision is optional.
+
+    Targeted edits change only the outline holding the item: the rest of the page,
+    and every other item's id, stay as they are. The page is backed up first (see
+    list_backups). An outline that holds handwriting or recordings cannot be edited this
+    way (it would lose them); attachments are kept.
+
+    Returns {"ok": true, "revision": "<new revision or null>", "ids": [objectIDs of
+    the items that are new on the page]}.
+    """
+    try:
+        return await asyncio.to_thread(
+            _insert_items_com, page_id, items, before_id=before_id, after_id=after_id,
+            outline_id=outline_id, at_end=at_end, expected_revision=expected_revision,
+        )
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def delete_items(page_id: str, item_ids: list[str], expected_revision: str | None = None) -> dict:
+    """Delete items (with the content indented under them) from a page.
+
+    item_ids: "id"s from get_page. An outline left without items is deleted.
+    Attachments and other read-only items can be deleted this way.
+    expected_revision: as in replace_page; the page must have been read with get_page.
+
+    Targeted edits change only the outline holding the item: the rest of the page,
+    and every other item's id, stay as they are. The page is backed up first (see
+    list_backups). An outline that holds handwriting or recordings cannot be edited this
+    way (it would lose them); attachments are kept.
+
+    Returns {"ok": true, "revision": "<new revision or null>", "ids": [objectIDs of
+    the items that are new on the page]}.
+    """
+    try:
+        return await asyncio.to_thread(_delete_items_com, page_id, item_ids, expected_revision=expected_revision)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def move_item(
+    page_id: str,
+    item_id: str,
+    before_id: str | None = None,
+    after_id: str | None = None,
+    under_id: str | None = None,
+    expected_revision: str | None = None,
+) -> dict:
+    """Move one item (with the content indented under it) within a page.
+
+    Give exactly one target: before_id or after_id (next to that item, at its
+    indentation level) or under_id (as the last item indented under it). Within the
+    same outline the item keeps its id; moved into another outline it gets a new one.
+    expected_revision: as in replace_page; the page must have been read with get_page.
+
+    Targeted edits change only the outline holding the item: the rest of the page,
+    and every other item's id, stay as they are. The page is backed up first (see
+    list_backups). An outline that holds handwriting or recordings cannot be edited this
+    way (it would lose them); attachments are kept.
+
+    Returns {"ok": true, "revision": "<new revision or null>", "ids": [objectIDs of
+    the items that are new on the page]}.
+    """
+    try:
+        return await asyncio.to_thread(
+            _move_item_com, page_id, item_id, before_id=before_id, after_id=after_id,
+            under_id=under_id, expected_revision=expected_revision,
+        )
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def replace_text(
+    page_id: str,
+    find: str,
+    replace: str,
+    match_case: bool = False,
+    item_id: str | None = None,
+    expected_revision: str | None = None,
+) -> dict:
+    """Find and replace text on a page, keeping its formatting.
+
+    Replaces every occurrence of find (case-insensitive unless match_case) in the
+    page's outlines, or with item_id only in that item's own text (a table item:
+    in all its cells). The title is not searched; use rename_page. Formatting,
+    links and styles are kept; a match that spans two differently formatted runs
+    is not replaced. With no match nothing is written.
+    expected_revision: as in replace_page; the page must have been read with get_page.
+
+    Returns {"replacements": n, "revision": "<new revision or null>"}.
+    """
+    try:
+        return await asyncio.to_thread(
+            _replace_text_com, page_id, find, replace,
+            match_case=match_case, item_id=item_id, expected_revision=expected_revision,
+        )
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def rename_page(page_id: str, title: str, expected_revision: str | None = None) -> str:
+    """Change a page's title without touching its content.
+
+    Needs no prior read; expected_revision is optional. The page is backed up first.
+    Returns "ok".
+    """
+    try:
+        return await asyncio.to_thread(_rename_page_com, page_id, title, expected_revision=expected_revision)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def set_tag(page_id: str, item_id: str, tag: Tag | None, expected_revision: str | None = None) -> dict:
+    """Set, change or clear the tag of one paragraph or list item.
+
+    tag: {"kind": "todo" | "important" | "question", "checked": false}, e.g. to tick
+    a to-do box pass {"kind": "todo", "checked": true}; null removes the item's tag.
+    The item's other content is unchanged.
+    expected_revision: as in replace_page; the page must have been read with get_page.
+
+    Returns {"ok": true, "revision": "<new revision or null>", "ids": []}.
+    """
+    try:
+        return await asyncio.to_thread(_set_tag_com, page_id, item_id, tag, expected_revision=expected_revision)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def create_notebook(name: str, location: str) -> dict:
+    """Create a new notebook and open it in OneNote.
+
+    name: the notebook's name (no \\ / : * ? " < > |).
+    location: where its files live: an absolute local folder (e.g. "D:\\Notebooks"),
+    or a OneDrive / SharePoint folder URL (e.g. "https://d.docs.live.net/<id>/Documents"
+    or "https://<tenant>-my.sharepoint.com/personal/<user>/Documents/Notebooks").
+    The notebook is created at location/name. Prefer the URL for notebooks that should
+    sync: OneNote notebooks inside a folder synced by the OneDrive app can be damaged.
+    With ONENOTE_ALLOWED_NOTEBOOKS set, the name or path must be listed there.
+
+    Returns {"id", "name", "path"}. Notebooks cannot be deleted through OneNote;
+    close_notebook removes one from OneNote, and its files can then be deleted by hand.
+    """
+    try:
+        return await asyncio.to_thread(structure.create_notebook, name, location)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def open_notebook(location: str) -> dict:
+    """Open an existing notebook from its local folder path or URL. Returns {"id", "name", "path"}."""
+    try:
+        return await asyncio.to_thread(structure.open_notebook, location)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def close_notebook(notebook_id: str, force: bool = False) -> str:
+    """Close a notebook in OneNote. Its files stay where they are (open_notebook reopens it).
+
+    force: close even if OneNote has changes it has not synced yet (they may be lost).
+    Returns "ok".
+    """
+    try:
+        return await asyncio.to_thread(structure.close_notebook, notebook_id, force)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def create_section_group(parent_id: str, name: str) -> dict:
+    """Create a section group in a notebook or in another section group.
+
+    parent_id: a notebook or section group id from get_notebooks. A sibling group
+    with the same name (ignoring case) is refused. Returns {"id", "name"}.
+    """
+    try:
+        return await asyncio.to_thread(structure.create_section_group, parent_id, name)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def create_section(parent_id: str, name: str, color: str | None = None) -> dict:
+    """Create a section in a notebook or section group.
+
+    parent_id: a notebook or section group id from get_notebooks. name: the section
+    name (a trailing ".one" is dropped). color: optional tab colour as "#RRGGBB".
+    A sibling section with the same name (ignoring case) is refused.
+    Returns {"id", "name"}; use the id with create_page.
+    """
+    try:
+        return await asyncio.to_thread(structure.create_section, parent_id, name, color)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def rename(object_id: str, name: str) -> str:
+    """Rename a notebook (its display name), a section group or a section.
+
+    object_id: an id from get_notebooks. A sibling of the same kind with the same
+    name (ignoring case) is refused. Use rename_page for pages. Returns "ok".
+    """
+    try:
+        return await asyncio.to_thread(structure.rename, object_id, name)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def move_section(section_id: str, new_parent_id: str, after_id: str | None = None, before_id: str | None = None) -> str:
+    """Move a section into a notebook or section group (or reorder it within its parent).
+
+    new_parent_id: a notebook or section group id. after_id / before_id: optionally a
+    sibling section id there to place it next to; default is the end. The section and
+    its pages keep their ids. Returns "ok".
+    """
+    try:
+        return await asyncio.to_thread(structure.move_section, section_id, new_parent_id, after_id=after_id, before_id=before_id)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def move_section_group(group_id: str, new_parent_id: str, after_id: str | None = None, before_id: str | None = None) -> str:
+    """Move a section group (with everything in it) into a notebook or another section group.
+
+    after_id / before_id: optionally a sibling section group to place it next to.
+    Returns "ok".
+    """
+    try:
+        return await asyncio.to_thread(structure.move_section_group, group_id, new_parent_id, after_id=after_id, before_id=before_id)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def move_page(page_id: str, target_section_id: str, after_page_id: str | None = None, level: int = 1) -> dict:
+    """Move a page into a section, or within its section to reorder it.
+
+    after_page_id: place it after that page of the target section; default is the end.
+    level: 1 for a top-level page, 2 or 3 for a subpage of the page above it.
+    Subpages of the moved page are not moved along; move them too.
+    Moving to another section gives the page a NEW id: returns {"page_id": <its id
+    now>, "id_changed": true|false}.
+    """
+    try:
+        return await asyncio.to_thread(structure.move_page, page_id, target_section_id, after_page_id, level)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def set_page_level(page_id: str, level: int) -> str:
+    """Make a page a top-level page (level 1) or a subpage (2 or 3) of the page above it.
+
+    The first page of a section is level 1, and a page is at most one level deeper
+    than the page before it. Returns "ok".
+    """
+    try:
+        return await asyncio.to_thread(structure.set_page_level, page_id, level)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def reorder_pages(section_id: str, page_ids: list[str]) -> str:
+    """Put a section's pages in a new order, keeping each page's level.
+
+    page_ids: every page id of the section (from list_pages), each once, in the new
+    order; the resulting levels must stay valid (see set_page_level). Returns "ok".
+    """
+    try:
+        return await asyncio.to_thread(structure.reorder_pages, section_id, page_ids)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def delete_page(page_id: str) -> dict:
+    """Delete a page. It goes to the notebook's OneNote recycle bin, and is backed up
+    locally first (restore_page with target_section_id brings it back).
+
+    Returns {"backup_id", "recycle_bin": true|false}.
+    """
+    try:
+        return await asyncio.to_thread(structure.delete_page, page_id)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def delete_section(section_id: str, include_pages: bool = False) -> dict:
+    """Delete a section into the notebook's OneNote recycle bin.
+
+    A section that still has pages is refused unless include_pages is true; every
+    page is backed up locally first, and if any backup fails nothing is deleted.
+    OneNote's recycle bin is the easiest way to undo; restore_page brings back
+    single pages from the backups.
+
+    Returns {"manifest_id", "pages_backed_up", "recycle_bin"}.
+    """
+    try:
+        return await asyncio.to_thread(structure.delete_section, section_id, include_pages)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def delete_section_group(group_id: str, include_contents: bool = False) -> dict:
+    """Delete a section group into the notebook's OneNote recycle bin.
+
+    A group that is not empty is refused unless include_contents is true; every page
+    in it is backed up locally first, and if any backup fails nothing is deleted.
+
+    Returns {"manifest_id", "pages_backed_up", "recycle_bin"}.
+    """
+    try:
+        return await asyncio.to_thread(structure.delete_section_group, group_id, include_contents)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def list_backups(page_id: str | None = None, section_id: str | None = None, since: str | None = None) -> list[dict]:
+    """List the local page backups, newest first.
+
+    The server backs up a page (content, images and attachments) before every
+    write that changes or removes existing content, and before restore_page.
+    Backups stay on this machine for ONENOTE_BACKUP_RETENTION_DAYS (default 30).
+
+    page_id / section_id: only backups of that page / of pages in that section.
+    since: only backups made at or after this ISO 8601 time, e.g. "2026-10-29T12:00:00Z".
+
+    Returns [{"backup_id", "page_id", "title", "notebook_id", "notebook_name",
+    "section_id", "section_name", "tool", "created", "attachments",
+    "missing_attachments"}]. Pass a backup_id to restore_page.
+    """
+    try:
+        return await asyncio.to_thread(_list_backups_com, page_id=page_id, section_id=section_id, since=since)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def restore_page(backup_id: str, target_section_id: str | None = None) -> dict:
+    """Restore a page from a backup (see list_backups).
+
+    If the backed-up page still exists, its whole content is replaced by the
+    backup (the current content is backed up first, so this can be undone).
+    If it no longer exists, pass target_section_id: the backup is restored as a
+    new page there. For a deleted section, OneNote's own recycle bin is the
+    better first choice; restore_page brings back single pages.
+
+    Returns {"page_id", "restored_over": true|false, "missing_attachments": [...]}
+    where missing_attachments names attachments that could not be backed up
+    and so are not restored.
+    """
+    try:
+        return await asyncio.to_thread(_restore_page_com, backup_id, target_section_id)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+def create_server(raw_xml_tools: bool = False) -> FastMCP:
+    """Build the MCP server; the four *_xml tools are registered only with raw_xml_tools=True."""
     server = FastMCP("onenote")
     for fn, is_raw_xml in _TOOLS:
         if raw_xml_tools or not is_raw_xml:
@@ -544,10 +1026,10 @@ def create_server(raw_xml_tools: bool = True) -> FastMCP:
 def main() -> None:
     """Entry point for the ``onenote-mcp`` console script (stdio transport)."""
     try:
-        raw_xml_disabled = _raw_xml_disabled(os.environ)
+        raw_xml_tools = config.raw_xml_enabled(os.environ)
     except ValueError as exc:
         sys.exit(f"onenote-mcp: {exc}")
-    create_server(raw_xml_tools=not raw_xml_disabled).run()
+    create_server(raw_xml_tools=raw_xml_tools).run()
 
 
 if __name__ == "__main__":

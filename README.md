@@ -7,6 +7,16 @@ OneNote's COM automation API.
 No Azure app registration, no Microsoft Graph, no cloud authentication: the server
 talks directly to the OneNote application running on your machine.
 
+> **This is a fork** of [noelroehrig/onenote-mcp](https://github.com/noelroehrig/onenote-mcp)
+> (version 2.0.0 of the fork). It adds safer writes (page backups and restore,
+> write-before-delete replaces, a revision check against overwriting edits made in
+> OneNote, protection for content a rewrite cannot re-create, blocking overlapping
+> writes), targeted item edits, find and replace, tables, hyperlinks, tags, images
+> and attachments from files, and tools to create, rename, move and delete notebook
+> structure. It also pins OneNote's XML schema to 2013, which newer OneNote builds
+> (16.0.20527) need: they answer in a 2026 namespace by default. The upstream
+> Foreword below is the original author's.
+
 ## Foreword
 
 I'm a software developer, but not a Python developer, so I built this MCP server relying heavily on an AI coding agent. I needed a reliable MCP server to create and edit OneNote pages and couldn't find an existing solution that did this well, so I built my own. Other solutions seemed to focus on pulling page content out for search and summarization with an LLM.
@@ -148,17 +158,38 @@ tools even though OneNote itself is reachable.
 
 | Tool | What it does |
 | --- | --- |
-| `get_notebooks` | Open notebooks with their sections (no pages): the small navigation skeleton. |
+| `get_notebooks` | Open notebooks with their section groups and sections as a tree (no pages): the small navigation skeleton. Sections inside a section group are listed under that group. |
 | `list_pages` | The pages of one section in section order, as `{id, name, level}`. `level` is 1 for a top-level page; a page's subpages are the pages that follow it with a higher level. |
 
 The intended flow: `get_notebooks` → pick a section → `list_pages(section_id)` →
 pick a page → read/write tools below.
 
+### Notebook structure
+
+| Tool | What it does |
+| --- | --- |
+| `create_notebook` | Create a notebook at `location/name`, where location is a local folder or a OneDrive/SharePoint URL. Prefer the URL for notebooks that sync: notebooks inside a folder the OneDrive app syncs can be damaged. |
+| `open_notebook` | Open an existing notebook from its folder or URL. |
+| `close_notebook` | Close a notebook in OneNote. Notebooks cannot be deleted through OneNote; after closing, delete its files by hand if wanted. |
+| `create_section_group` | Create a section group in a notebook or another section group. |
+| `create_section` | Create a section in a notebook or section group, optionally with a tab colour. |
+| `rename` | Rename a notebook (its display name), section group or section. |
+| `move_section` / `move_section_group` | Move a section or section group into a notebook or section group, optionally next to a sibling. Ids are kept. |
+| `move_page` | Move a page into another section (it gets a **new id**, returned) or within its section, at a given level. Subpages are not moved along. |
+| `set_page_level` | Make a page top-level (1) or a subpage (2, 3) of the page above it. |
+| `reorder_pages` | Put all of a section's pages in a new order, keeping their levels. |
+| `delete_page` | Delete a page into OneNote's recycle bin, backing it up first. |
+| `delete_section` | Delete a section into the recycle bin; one with pages needs `include_pages: true`. Every page is backed up first, and nothing is deleted if a backup fails. |
+| `delete_section_group` | Delete a section group into the recycle bin; a non-empty one needs `include_contents: true`. Pages are backed up as for sections. |
+
+New notebooks must be allowed by `ONENOTE_ALLOWED_NOTEBOOKS` when it is set (list
+their name or path there first).
+
 ### Reading
 
 | Tool | What it does |
 | --- | --- |
-| `get_page` | A page as structured JSON: paragraphs, headings, lists, indented content, inline and floating images, plus read-only markers for [content the structured tools cannot write](#content-the-structured-tools-cannot-write). Image bytes are **not** included; images carry compact `mcpref:` handles instead. |
+| `get_page` | A page as structured JSON: paragraphs, headings, lists, indented content, inline and floating images, plus read-only markers for [content the structured tools cannot write](#content-the-structured-tools-cannot-write). Image bytes are **not** included; images carry compact `mcpref:` handles instead. Every outline and item carries its OneNote `id`, and the page its `revision`. |
 | `get_image_data` | The base64 bytes for a single image handle, fetched on demand. |
 | `validate_handles` | Check whether image handles are still writable, without writing anything. Fetches and caches the bytes of handles not cached yet, so `true` means the bytes are in hand; `false` means the handle is unknown or OneNote no longer has the image. |
 
@@ -169,6 +200,25 @@ pick a page → read/write tools below.
 | `create_page` | Create a page in a section, optionally as a sub-page of an existing page. Returns the new page id. |
 | `replace_page` | Replace a page's entire content from structured JSON (outlines + floating images). Rejects read-only `unsupported` items and keeps page-level objects it cannot write in place, see below. |
 | `append_page` | Append one structured content block to an existing page, preserving current content. Rejects read-only `unsupported` items. |
+| `list_backups` | List the local page backups taken before writes, newest first, optionally for one page or section or since a time. |
+| `restore_page` | Write a backup back over its page, or as a new page in a given section when the original is gone. |
+
+### Targeted edits
+
+These change single items by the `id` `get_page` reports, without rewriting the page:
+only the outline holding the item is re-sent, and every other item keeps its id. They
+back the page up first. An outline that holds handwriting or recordings cannot be
+edited this way (re-sending it would lose them); attachments and images are kept.
+
+| Tool | What it does |
+| --- | --- |
+| `update_item` | Replace one item with new content (any item type, or a plain list item to keep the list style). Needs a prior `get_page`. |
+| `insert_items` | Insert items before or after an item, or at the start or end of an outline. Needs no prior read. |
+| `delete_items` | Delete items with the content indented under them; an emptied outline is removed. Needs a prior `get_page`. |
+| `move_item` | Move an item next to another or under it as its last child. Needs a prior `get_page`. |
+| `replace_text` | Find and replace text in one item or across the page (not the title), keeping formatting and links. Needs a prior `get_page`. |
+| `rename_page` | Change a page's title without touching its content. Needs no prior read. |
+| `set_tag` | Set, change or clear the tag of one item (e.g. tick a to-do). Needs a prior `get_page`. |
 
 ### Health
 
@@ -179,8 +229,9 @@ pick a page → read/write tools below.
 ### Raw-XML escape hatches
 
 Prefer the structured tools above; these exist for direct schema control and debugging.
-They cost significantly more tokens because of the XML overhead. Set
-[`ONENOTE_DISABLE_RAW_XML`](#configuration) to `1` to remove them from the server.
+They cost significantly more tokens because of the XML overhead, and they are
+**off by default**: set [`ONENOTE_ENABLE_RAW_XML`](#configuration) to `1` to
+register them.
 
 | Tool | What it does |
 | --- | --- |
@@ -188,6 +239,64 @@ They cost significantly more tokens because of the XML overhead. Set
 | `get_page_xml` | The full `<one:Page>` XML of a page, with images as `mcpref:` handles. |
 | `replace_page_xml` | Replace a page from a caller-supplied `<one:Page>` document. |
 | `append_page_xml` | Append a single raw XML element (e.g. `<one:Outline>`) to a page. |
+
+## Tables and links
+
+Tables are ordinary items: `{"type": "table", "rows": [[cell, ...], ...], "header_row":
+false, "column_widths": null, "borders": true}`. Each cell is `{"items": [...]}` holding
+paragraphs, lists, inline images or nested tables; a plain string is shorthand for a
+cell with one paragraph. Every row must have the same number of cells, and OneNote has
+no merged cells, so flatten them. Without `column_widths` OneNote sizes the columns to
+their content; `get_page` reports widths only when they were set explicitly.
+
+A text run (`segments` entry) can carry `"link": "https://..."`; `http://`, `https://`,
+`mailto:` and `onenote:` links are accepted. Links with other schemes read back as
+plain text.
+
+Paragraphs and list items take an optional `"tag": {"kind": "todo" | "important" |
+"question", "checked": false}`; `checked` ticks a to-do box. Other OneNote tags are not
+reported and are lost if the item is rewritten.
+
+## Images and attachments from files
+
+An image (`inline_image`, or a floating image in `images`) takes exactly one source:
+`handle` (an `mcpref:` handle from `get_page`), `data` (base64 PNG, JPEG, GIF or BMP)
+or `path` (a local image file). With `path`, give both `width` and `height` or neither
+(the image's natural size), since the server does not open the file.
+
+`{"type": "attachment", "path": "C:\\...\\Plan.docx", "name": "Plan.docx"}` attaches a
+file to the page; `name` defaults to the file name. `get_page` reads attachments back
+as `{"type": "attachment", "id": ..., "name": ...}`. A read attachment has no path, so
+it cannot be written back: keep it with targeted edits, or list its `id` in
+`remove_ids` to delete it with a replace.
+
+OneNote reads these files itself and copies them into the notebook, which may sync to
+the cloud, so every path must lie inside a folder listed in `ONENOTE_FILE_ROOTS`.
+Unset, inserting from a path is disabled and `data` is the only way to add a new
+image.
+
+## Page revisions
+
+`get_page` returns a `revision` token for the content it read. Writes that change or
+remove existing content (`replace_page`, `replace_page_xml`) only run if the page still
+has that revision; otherwise they fail with `conflict` and change nothing, so edits made
+in OneNote since the read are never overwritten. The server remembers the revision of
+the last read (or creation) of each page, so passing `expected_revision` is optional.
+A page the server has neither read nor created is refused with `bad_request` until it is
+read. Appending needs no prior read.
+
+OneNote's own last-modified check is not used: it accepted stale writes in testing.
+
+## Backups and restore
+
+Before every write that changes or removes existing content, the server saves a
+backup of the page on this machine: its full XML with image data, a copy of each
+attachment, and where it lived (notebook, section, title). `list_backups` lists them,
+newest first, and `restore_page` writes one back over its page, or as a new page in a
+given section when the page is gone. A restore backs up the current content first, so
+it can be undone too. Backups are kept for `ONENOTE_BACKUP_RETENTION_DAYS` days in
+`ONENOTE_BACKUP_DIR` and never leave this machine; they hold notebook content, so treat
+the folder like the notebooks themselves.
 
 ## Image handles (`mcpref:`)
 
@@ -205,24 +314,29 @@ position. This keeps reads of image-heavy pages small and fast.
 
 ## Content the structured tools cannot write
 
-Tables, handwriting and drawings (ink), attached files, audio/video recordings and
-content from newer OneNote versions have no structured item type. `get_page` still
-reports them, so nothing disappears unnoticed:
+Handwriting and drawings (ink), attached files, audio/video recordings and content
+from newer OneNote versions have no structured item type. `get_page` still reports
+them, so nothing disappears unnoticed:
 
 - Inside an outline, each becomes a read-only item such as
-  `{"type": "unsupported", "kind": "table", "text": "Name | Age\nAda | 36"}`.
-  `kind` is `table`, `ink`, `file`, `media` or `unknown`; `text` is the readable
-  text when OneNote provides it (table cells one row per line, recognized
-  handwriting, a file's name).
+  `{"type": "unsupported", "id": "{...}", "kind": "ink", "text": "recognised words"}`.
+  `kind` is `ink`, `media` or `unknown`; `text` is the readable text when OneNote
+  provides it (recognized handwriting, a recording's name). Attached files read as
+  `attachment` items instead (see below), and tables as `table` items.
 - Objects placed directly on the page canvas, such as handwriting, are listed in
   the top-level `unsupported` list with their kind, position and size.
 
 `replace_page` and `append_page` reject a payload that still contains an
-`unsupported` item with `bad_request`, because rewriting the page would delete that
-content. Remove the item deliberately only if deleting it is intended. The page-level
-`unsupported` objects cannot be passed back at all, so `replace_page` keeps them in
-place at their position: place new content where it does not overlap them.
-`replace_page_xml` still replaces everything, since its caller supplies the full page.
+`unsupported` item with `bad_request`. Leaving the item out is not enough either:
+`replace_page` refuses a page that holds such items inside its outlines, naming each
+one, because rewriting the page would delete them. List their `id`s in `remove_ids` if
+deleting them is intended; to keep them, change the rest of the page with targeted
+edits instead. The page-level `unsupported` objects cannot be passed back at all, so
+`replace_page` keeps them in place at their position: place new content where it does
+not overlap them. `replace_page_xml` has the same protections.
+
+A replace writes the new content first and deletes the old content afterwards, so a
+failure part-way leaves extra old content on the page, never an empty page.
 
 ## Error codes
 
@@ -234,6 +348,8 @@ Tool errors start with a machine-readable code so clients can react without pars
 | `backend_error` | OneNote returned a COM failure (bad id, locked content, …). |
 | `bad_request` | The request itself was invalid (unknown image handle, malformed content, …). |
 | `config_error` | The server's configuration is invalid, e.g. `ONENOTE_ALLOWED_NOTEBOOKS` still contains an unexpanded `${...}` placeholder. Fix the MCP client config and restart; `ping` shows the message. |
+| `busy` | An earlier write to the same page timed out but is still running in OneNote, so this write was refused. Wait, re-read the page, then retry; `ping` lists such pages under `writes_in_flight`. |
+| `conflict` | The page changed since it was read (for example the user edited it in OneNote), so the write was refused and nothing was changed. Re-read the page with `get_page` and retry. |
 | `partial_write` | A replace wrote the new content, but some old page objects could not be deleted and are still on the page. The message lists each one's kind, object id and hresult. Read the page with `get_page` and decide how to handle them instead of retrying the replace. |
 
 ## Configuration
@@ -243,12 +359,17 @@ the Claude Desktop server entry if needed):
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `ONENOTE_ALLOWED_NOTEBOOKS` | _(unset: no restriction)_ | Comma-separated notebook names, e.g. `SharedNotebook, Project Notes`. When set, all other notebooks are invisible and untouchable: they are hidden from notebook listings and every read/write against their sections or pages is rejected. An empty value allows no notebook. A value that still contains `${` (a placeholder the client did not expand) is a configuration error: notebook tools fail with `config_error` and `ping` reports it. |
+| `ONENOTE_ALLOWED_NOTEBOOKS` | _(unset: no restriction)_ | Comma-separated notebooks, e.g. `SharedNotebook, Project Notes`. Each entry matches a notebook's name or display name (exactly), its ID, or its path or URL (ignoring case and a trailing slash). When set, all other notebooks are invisible and untouchable: they are hidden from notebook listings and every read/write against their sections or pages is rejected. An empty value allows no notebook. A value that still contains `${` (a placeholder the client did not expand) is a configuration error: notebook tools fail with `config_error` and `ping` reports it. |
 | `ONENOTE_READ_TIMEOUT` | `20` | Timeout (s) for page/hierarchy reads and image fetches. |
 | `ONENOTE_WRITE_TIMEOUT` | `25` | Timeout (s) for page creates and writes. |
 | `ONENOTE_PING_TIMEOUT` | `8` | Timeout (s) for the `ping` health probe. |
+| `ONENOTE_FILE_ROOTS` | _(unset: disabled)_ | Semicolon-separated folders OneNote may insert images and attachments from, e.g. `D:\Exports;C:\Users\me\Documents\Notes`. Paths are resolved (`..` and links) before the check, which ignores case. |
+| `ONENOTE_BACKUP_DIR` | `%LOCALAPPDATA%\onenote-mcp\backups` | Folder for page backups. |
+| `ONENOTE_BACKUP_RETENTION_DAYS` | `30` | Backups older than this many days are deleted when the next backup is taken. |
+| `ONENOTE_ABANDON_WRITE_AFTER` | `300` | Seconds after which a timed-out write that is still running stops blocking further writes to its page. |
 | `ONENOTE_IMAGE_CACHE_MB` | `200` | In-memory cap for cached image bytes; least-recently-used entries are evicted beyond it. |
-| `ONENOTE_DISABLE_RAW_XML` | _(unset: raw-XML tools on)_ | `1` or `true` (any case): the four raw-XML tools (`list_hierarchy_xml`, `get_page_xml`, `replace_page_xml`, `append_page_xml`) are not registered and do not appear in the tool list. Unset, empty, `0` or `false`: all tools are available. Any other value stops the server at startup with an error. Read once at startup. |
+| `ONENOTE_ENABLE_RAW_XML` | _(unset: raw-XML tools off)_ | `1` or `true` (any case): the four raw-XML tools (`list_hierarchy_xml`, `get_page_xml`, `replace_page_xml`, `append_page_xml`) are registered. Unset, empty, `0` or `false`: they are not. Any other value stops the server at startup with an error. Read once at startup. |
+| `ONENOTE_DISABLE_RAW_XML` | _(unset)_ | The upstream setting, still honoured: `1` or `true` keeps the raw-XML tools off even when `ONENOTE_ENABLE_RAW_XML` is set. Same accepted values. |
 
 ## Standalone executable details
 
@@ -309,9 +430,16 @@ Unit tests (no OneNote required):
 ```
 
 End-to-end tests drive the real MCP server against the real OneNote desktop app.
-They create pages and leave them in place. Open a notebook named **ClaudeSpike** in
-OneNote first: without it, the tests write into the first section of the first open
-notebook.
+They create pages, sections and section groups and leave them in place. They only
+ever touch a notebook named **ClaudeSpike** (the suite sets
+`ONENOTE_ALLOWED_NOTEBOOKS=ClaudeSpike`) and skip when it is not open, so create a
+throwaway ClaudeSpike notebook first. They insert files from the temp folder and
+`D:\scratch\onenote-mcp-tests\files`, and back pages up to
+`D:\scratch\onenote-mcp-tests\backups`.
+
+The notebook-creation test only runs when `ONENOTE_E2E_NOTEBOOK_LOCATION` names a
+folder or URL where it may create a notebook. OneNote cannot delete notebooks, so it
+prints the name and location of the notebook it leaves behind.
 
 ```
 .venv\Scripts\python.exe -m pytest -m e2e tests/e2e/ -v
@@ -344,9 +472,9 @@ py -m venv %TEMP%\onenote-mcp-build
 ```
 
 The smoke test speaks MCP over stdio to the exe: it checks that the exe exposes the
-same tools as the source and that `ping` answers, then starts it again with
-`ONENOTE_DISABLE_RAW_XML=1` and checks for exactly the 9 tools without the raw-XML
-ones. `--require-onenote` additionally requires a responsive OneNote and a working
+same default tools as the source (no raw-XML tools) and that `ping` answers, then
+starts it again with `ONENOTE_ENABLE_RAW_XML=1` and checks that exactly the four
+raw-XML tools are added. `--require-onenote` additionally requires a responsive OneNote and a working
 `get_notebooks`; CI runs without it because the runner has no OneNote.
 
 ## License

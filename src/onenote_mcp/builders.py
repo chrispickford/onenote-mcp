@@ -5,7 +5,6 @@ The public API is two functions:
   build_append_xml(outline)        → <one:Page> without ID holding the outline (for append_page)
 
 Read-direction parsers (xml → models/dicts):
-  parse_notebook_skeleton(xml) → [{"id", "name", "sections": [...]}]
   parse_section_pages(xml)     → [{"id", "name", "level"}]
   parse_page(xml)              → PageContent
 """
@@ -13,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import html as _html_module
+import ntpath
 import re
 import struct
 import xml.etree.ElementTree as ET
@@ -22,7 +22,8 @@ from html.parser import HTMLParser
 
 from onenote_mcp.models import (
     FONT_FAMILY_MAX_LENGTH, FONT_FAMILY_PATTERN, HEX_COLOR_PATTERN,
-    ContentItem, FloatingImage, ImagePlaceholder, InlineImage, List, ListChild, ListItem,
+    LINK_SCHEMES, Attachment, ContentItem, Tag, FloatingImage, ImagePlaceholder, InlineImage, List, ListChild, ListItem,
+    Table, TableCell,
     Outline, PageContent, PageOutline, Paragraph, Position, TextRun, UnsupportedItem,
     UnsupportedPageObject,
 )
@@ -44,6 +45,46 @@ _HEADING_STYLE_DEFS: dict[str, dict[str, str]] = {
 _HEADING_QUICK_STYLE_INDEX: dict[str, str] = {
     name: str(index) for index, name in enumerate(_HEADING_STYLE_DEFS)
 }
+
+
+# Tags, written as <one:TagDef> elements (name, symbol, type) that each
+# <one:Tag index> refers to.  Like the heading styles, the index is local to
+# the written XML; OneNote maps each definition into the page's own table.
+_TAG_DEFS: dict[str, tuple[str, str, str]] = {
+    "todo": ("To Do", "3", "0"),
+    "important": ("Important", "13", "1"),
+    "question": ("Question", "15", "2"),
+}
+_TAG_LOCAL_INDEX: dict[str, str] = {kind: str(index) for index, kind in enumerate(_TAG_DEFS)}
+_TAG_KIND_BY_SYMBOL: dict[str, str] = {symbol: kind for kind, (_, symbol, _) in _TAG_DEFS.items()}
+# Set on parsed <one:Tag> elements by parse_page: the kind their TagDef resolves to.
+_TAG_KIND_ATTR = "onenote-mcp-kind"
+
+
+def tag_def_el(kind: str, index: str) -> ET.Element:
+    """Return the <one:TagDef> for tag *kind* at *index*."""
+    name, symbol, tag_type = _TAG_DEFS[kind]
+    return ET.Element(f"{{{_ONE_NS}}}TagDef", {
+        "index": index, "type": tag_type, "symbol": symbol,
+        "fontColor": "automatic", "highlightColor": "none", "name": name,
+    })
+
+
+def _add_tag(oe: ET.Element, tag: Tag | None) -> None:
+    """Put *tag* first in *oe*: the schema wants <one:Tag> before Meta, List and text."""
+    if tag is None:
+        return
+    oe.insert(0, ET.Element(f"{{{_ONE_NS}}}Tag", {
+        "index": _TAG_LOCAL_INDEX[tag.kind], "completed": "true" if tag.checked else "false",
+    }))
+
+
+def _prepend_tag_defs(page_el: ET.Element) -> None:
+    """Insert the TagDefs the tags in *page_el* refer to; they come first on the page."""
+    used = {tag.get("index") for tag in page_el.iter(f"{{{_ONE_NS}}}Tag")}
+    kinds = [kind for kind, index in _TAG_LOCAL_INDEX.items() if index in used]
+    for position, kind in enumerate(kinds):
+        page_el.insert(position, tag_def_el(kind, _TAG_LOCAL_INDEX[kind]))
 
 
 def _quick_style_def_el(name: str) -> ET.Element:
@@ -149,8 +190,11 @@ def _wrap_span(text: str, styles: list[str]) -> str:
 
 
 def _run_to_html(run: TextRun) -> str:
-    """Return an HTML string for one TextRun."""
-    return _wrap_span(run.text, _format_declarations(run))
+    """Return an HTML string for one TextRun, wrapped in an anchor when it links."""
+    html = _wrap_span(run.text, _format_declarations(run))
+    if run.link is None:
+        return html
+    return f'<a href="{_html_module.escape(run.link, quote=True)}">{html}</a>'
 
 
 def _paragraph_html(text: str, p: Paragraph) -> str:
@@ -178,6 +222,7 @@ def _paragraph_to_oe(
         html = "".join(_run_to_html(run) for run in p.segments)
         _set_t_html(t_el, html, cdata_map, cdata_counter)
 
+    _add_tag(oe, p.tag)
     _append_children(oe, _items_to_oes(p.children, cdata_map, cdata_counter))
     return oe
 
@@ -222,11 +267,18 @@ def _floating_image_to_el(img: FloatingImage) -> ET.Element:
         pos_el.set("z", str(img.position.z))
 
     _add_image_size(image_el, img.width, img.height)
-
-    data_el = ET.SubElement(image_el, f"{{{_ONE_NS}}}Data")
-    data_el.text = img.handle
-
+    _add_image_source(image_el, img)
     return image_el
+
+
+def _add_image_source(image_el: ET.Element, img: "InlineImage | FloatingImage") -> None:
+    """Add the image's bytes: a <one:Data> holding a handle or base64 data, or a
+    <one:File> whose path OneNote reads itself."""
+    if img.path is not None:
+        ET.SubElement(image_el, f"{{{_ONE_NS}}}File", {"path": img.path})
+        return
+    data_el = ET.SubElement(image_el, f"{{{_ONE_NS}}}Data")
+    data_el.text = img.handle if img.handle is not None else img.data
 
 
 # ---- InlineImage → OE element -----------------------------------------------
@@ -245,9 +297,7 @@ def _inline_image_to_oe(
     image_el = ET.SubElement(oe, f"{{{_ONE_NS}}}Image")
 
     _add_image_size(image_el, img.width, img.height)
-
-    data_el = ET.SubElement(image_el, f"{{{_ONE_NS}}}Data")
-    data_el.text = img.handle
+    _add_image_source(image_el, img)
 
     _append_children(oe, _items_to_oes(img.children, cdata_map, cdata_counter))
     return oe
@@ -391,6 +441,7 @@ def _list_items_to_oes(
             html = "".join(_run_to_html(run) for run in item.segments)
             _set_t_html(t_el, html, cdata_map, cdata_counter)
 
+        _add_tag(oe, item.tag)
         _append_children(oe, _list_children_to_oes(item.children, list_style, cdata_map, cdata_counter))
         result.append(oe)
 
@@ -450,7 +501,70 @@ def _item_to_oes(
         return [_inline_image_to_oe(item, cdata_map, cdata_counter)]
     if isinstance(item, List):
         return _list_to_oes(item, cdata_map, cdata_counter)
+    if isinstance(item, Table):
+        return [_table_to_oe(item, cdata_map, cdata_counter)]
+    if isinstance(item, Attachment):
+        return [_attachment_to_oe(item, cdata_map, cdata_counter)]
     raise ValueError(_UNSUPPORTED_ITEM_ERROR.format(kind=item.kind))
+
+
+def _attachment_to_oe(
+    attachment: Attachment,
+    cdata_map: dict[int, str],
+    cdata_counter: list[int],
+) -> ET.Element:
+    """Return the OE holding a <one:InsertedFile> OneNote copies from *attachment*.path.
+
+    An attachment read from a page has no path, so it cannot be re-created.
+    """
+    if attachment.path is None:
+        raise ValueError(
+            "An attachment read from a page cannot be written back; use targeted edits to keep it "
+            "(or list its id in remove_ids to delete it)."
+        )
+    oe = ET.Element(f"{{{_ONE_NS}}}OE")
+    ET.SubElement(oe, f"{{{_ONE_NS}}}InsertedFile", {
+        "pathSource": attachment.path,
+        "preferredName": attachment.name or ntpath.basename(attachment.path),
+    })
+    _append_children(oe, _items_to_oes(attachment.children, cdata_map, cdata_counter))
+    return oe
+
+
+def _table_to_oe(
+    table: Table,
+    cdata_map: dict[int, str],
+    cdata_counter: list[int],
+) -> ET.Element:
+    """Return the OE holding a <one:Table> for *table*.
+
+    <one:Columns> is written only with explicit widths; without it OneNote
+    sizes the columns to their content.  An empty cell still gets one empty
+    OE, since the schema requires one.
+    """
+    oe = ET.Element(f"{{{_ONE_NS}}}OE")
+    table_el = ET.SubElement(oe, f"{{{_ONE_NS}}}Table", {
+        "bordersVisible": "true" if table.borders else "false",
+        "hasHeaderRow": "true" if table.header_row else "false",
+    })
+    if table.column_widths is not None:
+        columns_el = ET.SubElement(table_el, f"{{{_ONE_NS}}}Columns")
+        for index, width in enumerate(table.column_widths):
+            ET.SubElement(columns_el, f"{{{_ONE_NS}}}Column", {
+                "index": str(index), "width": str(width), "isLocked": "true",
+            })
+    for row in table.rows:
+        row_el = ET.SubElement(table_el, f"{{{_ONE_NS}}}Row")
+        for cell in row:
+            cell_el = ET.SubElement(row_el, f"{{{_ONE_NS}}}Cell")
+            oes = _items_to_oes(cell.items, cdata_map, cdata_counter)
+            if not oes:
+                empty = ET.Element(f"{{{_ONE_NS}}}OE")
+                ET.SubElement(empty, f"{{{_ONE_NS}}}T").text = ""
+                oes = [empty]
+            ET.SubElement(cell_el, f"{{{_ONE_NS}}}OEChildren").extend(oes)
+    _append_children(oe, _items_to_oes(table.children, cdata_map, cdata_counter))
+    return oe
 
 
 def _items_to_oes(
@@ -538,6 +652,7 @@ def build_page_xml(title: str, outlines: list[Outline], images: list[FloatingIma
         root.append(_floating_image_to_el(img))
 
     _prepend_quick_style_defs(root)
+    _prepend_tag_defs(root)
     xml_str = ET.tostring(root, encoding="unicode", xml_declaration=False)
     return _apply_cdata(xml_str, cdata_map)
 
@@ -551,6 +666,7 @@ def build_append_xml(outline: Outline) -> str:
     page_el = ET.Element(f"{{{_ONE_NS}}}Page")
     page_el.append(_outline_to_el(outline, cdata_map, cdata_counter))
     _prepend_quick_style_defs(page_el)
+    _prepend_tag_defs(page_el)
 
     xml_str = ET.tostring(page_el, encoding="unicode", xml_declaration=False)
     return _apply_cdata(xml_str, cdata_map)
@@ -678,9 +794,15 @@ class _RunCollector(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         style = dict(self._stack[-1])
+        attr_map = {k: (v or "") for k, v in attrs}
         if tag == "span":
-            attr_map = {k: (v or "") for k, v in attrs}
             style.update(_fmt_from_style(attr_map.get("style", "")))
+        elif tag == "a":
+            # Links with other schemes (file:, ...) read as plain text: the
+            # model only accepts the schemes it can write back safely.
+            href = attr_map.get("href", "")
+            if href.lower().startswith(LINK_SCHEMES):
+                style["link"] = href
         self._stack.append(style)
 
     def handle_startendtag(self, tag, attrs):
@@ -762,6 +884,15 @@ def _oe_runs(
     return _merge_runs(runs, _quick_style_format(oe_el, quick_style_map, reproduced_styles))
 
 
+def _parse_tag(oe_el: ET.Element) -> Tag | None:
+    """Return the tag of *oe_el* that parse_page resolved to a known kind, or None."""
+    for tag_el in oe_el.findall(f"{{{_ONE_NS}}}Tag"):
+        kind = tag_el.get(_TAG_KIND_ATTR)
+        if kind is not None:
+            return Tag(kind=kind, checked=kind == "todo" and tag_el.get("completed") == "true")
+    return None
+
+
 def _parse_list_item(
     oe_el: ET.Element,
     quick_style_map: dict[str, ET.Element] | None = None,
@@ -775,13 +906,15 @@ def _parse_list_item(
     """
     runs = _oe_runs(oe_el, quick_style_map, _LIST_ITEM_QUICK_STYLES)
     children = _parse_list_children(oe_el, quick_style_map)
+    object_id = oe_el.get("objectID")
+    tag = _parse_tag(oe_el)
 
     if not runs:
-        return ListItem(text="", children=children)
+        return ListItem(id=object_id, text="", tag=tag, children=children)
     if len(runs) == 1 and not runs[0][1]:
-        return ListItem(text=runs[0][0], children=children)
+        return ListItem(id=object_id, text=runs[0][0], tag=tag, children=children)
     segments = [TextRun(text=text, **fmt) for text, fmt in runs]
-    return ListItem(segments=segments, children=children)
+    return ListItem(id=object_id, segments=segments, tag=tag, children=children)
 
 
 def _parse_list_children(
@@ -874,13 +1007,14 @@ def _parse_paragraph_oe(
     style = _resolve_heading_style(el, quick_style_map)
     runs = _oe_runs(el, quick_style_map, _PARAGRAPH_QUICK_STYLES)
 
+    tag = _parse_tag(el)
     if not runs:
-        return Paragraph(type="paragraph", text="", style=style, children=children)
-    if len(runs) == 1:
+        return Paragraph(type="paragraph", text="", style=style, tag=tag, children=children)
+    if len(runs) == 1 and "link" not in runs[0][1]:
         text, fmt = runs[0]
-        return Paragraph(type="paragraph", text=text, style=style, children=children, **fmt)
+        return Paragraph(type="paragraph", text=text, style=style, tag=tag, children=children, **fmt)
     segments = [TextRun(text=text, **fmt) for text, fmt in runs]
-    return Paragraph(type="paragraph", segments=segments, style=style, children=children)
+    return Paragraph(type="paragraph", segments=segments, style=style, tag=tag, children=children)
 
 
 def _parse_size(el: ET.Element) -> tuple[float | None, float | None]:
@@ -928,7 +1062,6 @@ def _parse_inline_image(img_el: ET.Element, children: list[ContentItem]) -> Inli
 _UNSUPPORTED_KINDS: dict[str, str] = {
     f"{{{_ONE_NS}}}{name}": kind
     for name, kind in (
-        ("Table", "table"),
         ("InkDrawing", "ink"),
         ("InkParagraph", "ink"),
         ("InkWord", "ink"),
@@ -943,6 +1076,30 @@ _UNSUPPORTED_KINDS: dict[str, str] = {
 UNSUPPORTED_PAGE_OBJECT_TAGS: frozenset[str] = frozenset(
     f"{{{_ONE_NS}}}{name}" for name in ("InkDrawing", "InsertedFile", "MediaFile", "FutureObject")
 )
+
+
+def protected_items(page_root: ET.Element) -> list[tuple[str, str]]:
+    """Return (objectID, kind) of every OE inside an outline whose content a
+    rewrite cannot re-create (see _UNSUPPORTED_KINDS), in document order.
+
+    Rewriting the page deletes its outlines, so replace refuses unless each of
+    these is listed for removal.  Content nested inside a listed OE is not
+    listed again.
+    """
+    found: list[tuple[str, str]] = []
+
+    def walk(el: ET.Element) -> None:
+        for child in el:
+            if child.tag == f"{{{_ONE_NS}}}OE":
+                content = _unsupported_content(child)
+                if content is not None:
+                    found.append((child.get("objectID", ""), _UNSUPPORTED_KINDS[content.tag]))
+                    continue
+            walk(child)
+
+    for outline_el in page_root.findall(f"{{{_ONE_NS}}}Outline"):
+        walk(outline_el)
+    return found
 
 
 def _unsupported_content(oe_el: ET.Element) -> ET.Element | None:
@@ -988,6 +1145,7 @@ def _parse_unsupported_oe(oe_el: ET.Element, children: list[ContentItem]) -> Uns
     texts = (_readable_text(child) for child in oe_el if child.tag != f"{{{_ONE_NS}}}OEChildren")
     return UnsupportedItem(
         type="unsupported",
+        id=oe_el.get("objectID"),
         kind=_UNSUPPORTED_KINDS[_unsupported_content(oe_el).tag],
         text=" ".join(text for text in texts if text),
         children=children,
@@ -1096,6 +1254,8 @@ def _list_style(oe_el: ET.Element) -> str | None:
     list_el = oe_el.find(f"{{{_ONE_NS}}}List")
     if list_el is None or oe_el.find(f"{{{_ONE_NS}}}Image") is not None:
         return None
+    if oe_el.find(f"{{{_ONE_NS}}}Table") is not None:
+        return None
     if _unsupported_content(oe_el) is not None:
         return None
     return "bullet" if list_el.find(f"{{{_ONE_NS}}}Bullet") is not None else "numbered"
@@ -1112,15 +1272,63 @@ def _parse_oe(
     _with_placeholder_boxes.  Returns None for an image without a handle.  The
     OE's indented children are parsed into the item's ``children``.
     """
+    item: ContentItem | None
     if _is_placeholder_label(el):
-        return _parse_placeholder(el, box)
-    children = _parse_outline_items(_child_oes(el), quick_style_map)
-    if _unsupported_content(el) is not None:
-        return _parse_unsupported_oe(el, children)
-    img_el = el.find(f"{{{_ONE_NS}}}Image")
-    if img_el is not None:
-        return _parse_inline_image(img_el, children)
-    return _parse_paragraph_oe(el, quick_style_map, children)
+        item = _parse_placeholder(el, box)
+    else:
+        children = _parse_outline_items(_child_oes(el), quick_style_map)
+        img_el = el.find(f"{{{_ONE_NS}}}Image")
+        table_el = el.find(f"{{{_ONE_NS}}}Table")
+        content = _unsupported_content(el)
+        if content is not None and content.tag == f"{{{_ONE_NS}}}InsertedFile":
+            item = Attachment(type="attachment", name=content.get("preferredName"), children=children)
+        elif content is not None:
+            item = _parse_unsupported_oe(el, children)
+        elif table_el is not None:
+            item = _parse_table(table_el, quick_style_map, children)
+        elif img_el is not None:
+            item = _parse_inline_image(img_el, children)
+        else:
+            item = _parse_paragraph_oe(el, quick_style_map, children)
+    if item is not None:
+        item.id = el.get("objectID")
+    return item
+
+
+def _parse_table(
+    table_el: ET.Element,
+    quick_style_map: dict[str, ET.Element] | None,
+    children: list[ContentItem],
+) -> Table:
+    """Parse a <one:Table> into a Table; each cell's OEs parse like outline items.
+
+    Column widths are reported only when every column's width is locked (set
+    explicitly, as table writes do); OneNote's automatic widths are left out
+    so the table stays auto-sized when written back.  They are rounded to
+    0.01 pt (OneNote stores floats such as 100.0000076), so a read-write-read
+    round trip is stable.
+    """
+    columns = table_el.find(f"{{{_ONE_NS}}}Columns")
+    column_els = columns.findall(f"{{{_ONE_NS}}}Column") if columns is not None else []
+    widths = (
+        [round(float(col.get("width", "0")), 2) for col in column_els]
+        if column_els and all(col.get("isLocked") == "true" for col in column_els) else None
+    )
+    rows = [
+        [
+            TableCell(items=_parse_outline_items(_child_oes(cell_el), quick_style_map))
+            for cell_el in row_el.findall(f"{{{_ONE_NS}}}Cell")
+        ]
+        for row_el in table_el.findall(f"{{{_ONE_NS}}}Row")
+    ]
+    return Table(
+        type="table",
+        rows=rows,
+        header_row=table_el.get("hasHeaderRow") == "true",
+        column_widths=widths if widths and len(widths) == len(rows[0]) else None,
+        borders=table_el.get("bordersVisible") != "false",
+        children=children,
+    )
 
 
 def _parse_outline_items(
@@ -1159,28 +1367,6 @@ def _parse_outline_items(
 
 # ---- Public read functions --------------------------------------------------
 
-def parse_notebook_skeleton(xml: str) -> list[dict]:
-    """Parse hierarchy XML into notebooks, each with its sections (id+name, no pages).
-
-    Shape: [{"id", "name", "sections": [{"id", "name"}]}].  This is the lean
-    navigation skeleton returned by get_notebooks — small enough to fetch the
-    whole notebook/section map without pulling any pages.
-    """
-    root = ET.fromstring(xml)
-    notebooks: list[dict] = []
-    for nb_el in root.findall(f"{{{_ONE_NS}}}Notebook"):
-        sections = [
-            {"id": sec_el.get("ID", ""), "name": sec_el.get("name", "")}
-            for sec_el in nb_el.findall(f"{{{_ONE_NS}}}Section")
-        ]
-        notebooks.append({
-            "id": nb_el.get("ID", ""),
-            "name": nb_el.get("name", ""),
-            "sections": sections,
-        })
-    return notebooks
-
-
 def parse_section_pages(xml: str) -> list[dict]:
     """Parse a section-scoped hierarchy XML into its pages as [{"id", "name", "level"}].
 
@@ -1215,7 +1401,10 @@ def _parse_top_level_image(img_el: ET.Element) -> FloatingImage:
             width = float(w_str)
             height = float(h_str)
 
-    return FloatingImage(handle=handle, width=width, height=height, position=_parse_position(img_el))
+    return FloatingImage(
+        id=img_el.get("objectID"), handle=handle, width=width, height=height,
+        position=_parse_position(img_el),
+    )
 
 
 def parse_page(xml: str) -> PageContent:
@@ -1232,6 +1421,18 @@ def parse_page(xml: str) -> PageContent:
         if def_el.get("index") is not None and def_el.get("name") is not None
     }
 
+    # Resolve each <one:Tag> to a kind through the page's TagDefs (by symbol,
+    # since names are localised); tags of other kinds stay unmarked and are
+    # not reported.
+    tag_kinds = {
+        def_el.get("index"): _TAG_KIND_BY_SYMBOL.get(def_el.get("symbol", ""))
+        for def_el in root.findall(f"{{{_ONE_NS}}}TagDef")
+    }
+    for tag_el in root.iter(f"{{{_ONE_NS}}}Tag"):
+        kind = tag_kinds.get(tag_el.get("index"))
+        if kind is not None:
+            tag_el.set(_TAG_KIND_ATTR, kind)
+
     # Extract title: the text of every <one:T>, OEs joined by spaces
     title = ""
     title_el = root.find(f"{{{_ONE_NS}}}Title")
@@ -1247,6 +1448,7 @@ def parse_page(xml: str) -> PageContent:
         width, height = _parse_size(outline_el)
         items = _parse_outline_items(_child_oes(outline_el), quick_style_map or None)
         outlines.append(PageOutline(
+            id=outline_el.get("objectID"),
             position=_parse_position(outline_el), width=width, height=height, items=items,
         ))
 
@@ -1259,4 +1461,51 @@ def parse_page(xml: str) -> PageContent:
         _parse_unsupported_page_object(el) for el in root if el.tag in UNSUPPORTED_PAGE_OBJECT_TAGS
     ]
 
-    return PageContent(title=title, outlines=outlines, images=images, unsupported=unsupported)
+    return PageContent(
+        title=title, outlines=outlines, images=images, unsupported=unsupported,
+        last_modified=root.get("lastModifiedTime"),
+    )
+
+
+# ---- Building blocks for targeted edits (edits.py) ---------------------------
+
+def build_item_elements(
+    items: list[ListChild], list_style: str = "bullet",
+) -> tuple[list[ET.Element], dict[int, str]]:
+    """Return the OEs for *items* and the CDATA map apply_cdata needs after serialising.
+
+    A ListItem becomes a list OE in *list_style* ('bullet' or 'numbered');
+    every other item is built as in a whole-page write.  Heading OEs carry
+    the local quickStyleIndex of HEADING_QUICK_STYLE_INDEX, tags the local
+    index of TAG_LOCAL_INDEX; edits.py remaps both to the page's tables.
+    """
+    cdata_map: dict[int, str] = {}
+    cdata_counter = [0]
+    oes: list[ET.Element] = []
+    for item in items:
+        if isinstance(item, ListItem):
+            oes.extend(_list_items_to_oes([item], list_style, cdata_map, cdata_counter))
+        else:
+            oes.extend(_item_to_oes(item, cdata_map, cdata_counter))
+    return oes, cdata_map
+
+
+def apply_cdata(xml_str: str, cdata_map: dict[int, str]) -> str:
+    """Put the CDATA sections back into XML serialised from build_item_elements OEs."""
+    return _apply_cdata(xml_str, cdata_map)
+
+
+HEADING_QUICK_STYLE_INDEX = _HEADING_QUICK_STYLE_INDEX
+TAG_LOCAL_INDEX = _TAG_LOCAL_INDEX
+quick_style_def_el = _quick_style_def_el
+
+
+def tag_symbol(kind: str) -> str:
+    return _TAG_DEFS[kind][1]
+
+
+def oe_content_kind(oe_el: ET.Element) -> str | None:
+    """Return the kind ('ink', 'file', 'media', 'unknown') of content in *oe_el* the
+    structured tools cannot write, or None."""
+    content = _unsupported_content(oe_el)
+    return _UNSUPPORTED_KINDS[content.tag] if content is not None else None
