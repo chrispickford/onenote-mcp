@@ -24,6 +24,7 @@ sends.  For tools that return ``str``, it is the raw string.
 from __future__ import annotations
 
 import asyncio
+import os
 import json
 import sys
 import threading
@@ -112,10 +113,13 @@ async def _build_session(python_exe: str) -> tuple[Any, Any]:
     from mcp.client.session import ClientSession
     from mcp.client.stdio import StdioServerParameters, stdio_client
 
+    # Pass the full environment: the SDK's default passes only a safe subset,
+    # which would drop the ONENOTE_* settings conftest.py sets.
     params = StdioServerParameters(
         command=python_exe,
         args=["-m", "onenote_mcp.server"],
         cwd=str(_REPO_ROOT),
+        env=dict(os.environ),
     )
     # We enter the context manager manually so we can yield from a sync fixture.
     cm = stdio_client(params)
