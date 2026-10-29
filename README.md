@@ -244,11 +244,16 @@ reports them, so nothing disappears unnoticed:
   the top-level `unsupported` list with their kind, position and size.
 
 `replace_page` and `append_page` reject a payload that still contains an
-`unsupported` item with `bad_request`, because rewriting the page would delete that
-content. Remove the item deliberately only if deleting it is intended. The page-level
-`unsupported` objects cannot be passed back at all, so `replace_page` keeps them in
-place at their position: place new content where it does not overlap them.
-`replace_page_xml` still replaces everything, since its caller supplies the full page.
+`unsupported` item with `bad_request`. Leaving the item out is not enough either:
+`replace_page` refuses a page that holds such items inside its outlines, naming each
+one, because rewriting the page would delete them. List their `id`s in `remove_ids` if
+deleting them is intended; to keep them, change the rest of the page with targeted
+edits instead. The page-level `unsupported` objects cannot be passed back at all, so
+`replace_page` keeps them in place at their position: place new content where it does
+not overlap them. `replace_page_xml` has the same protections.
+
+A replace writes the new content first and deletes the old content afterwards, so a
+failure part-way leaves extra old content on the page, never an empty page.
 
 ## Error codes
 
