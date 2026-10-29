@@ -265,3 +265,71 @@ def test_move_page_to_other_section_reports_new_id(app):
     assert structure.move_page("{P1}", "{S2}") == {"page_id": "{MOVED}", "id_changed": True}
     (xml,) = _updates(app)
     assert xml.get("ID") == "{S2}" and [c.get("ID") for c in xml] == ["{P1}"]
+
+
+# ---- delete ---------------------------------------------------------------------------
+
+from onenote_mcp import backups  # noqa: E402
+
+
+def _deletes(app) -> list[str]:
+    return [call[1] for call in app.calls if call[0] == "delete"]
+
+
+def test_delete_page_backs_up_first(app, _backup_dir):
+    def delete(object_id, date, permanently):
+        assert len(backups.list_backups(_backup_dir, page_id="{P1}")) == 1, "backup must exist before the delete"
+        app.calls.append(("delete", object_id, permanently))
+
+    app.DeleteHierarchy = delete
+    result = structure.delete_page("{P1}")
+    assert _deletes(app) == ["{P1}"]
+    assert result["backup_id"] == backups.list_backups(_backup_dir, page_id="{P1}")[0]["backup_id"]
+    assert ("delete", "{P1}", False) in app.calls, "deletes go to the recycle bin, never permanently"
+
+
+def test_delete_nonempty_section_needs_flag(app):
+    message = _bad_request(lambda: structure.delete_section("{S1}"))
+    assert "Section has 3 pages; pass include_pages=true to delete them too" in message
+    assert _deletes(app) == []
+
+
+def test_delete_empty_section_needs_no_flag(app):
+    result = structure.delete_section("{S2}")
+    assert _deletes(app) == ["{S2}"] and result["pages_backed_up"] == 0
+
+
+def test_delete_section_backs_up_every_page(app, _backup_dir):
+    result = structure.delete_section("{S1}", include_pages=True)
+    assert result["pages_backed_up"] == 3
+    assert {m["page_id"] for m in backups.list_backups(_backup_dir)} == {"{P1}", "{P2}", "{P3}"}
+    manifest = backups.load_manifest(_backup_dir, result["manifest_id"])
+    assert manifest["deleted_id"] == "{S1}" and len(manifest["page_backups"]) == 3
+    assert "Top" in manifest["hierarchy_xml"]
+
+
+def test_backup_failure_prevents_delete(app, monkeypatch):
+    def broken(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(backups, "save", broken)
+    with pytest.raises(OSError):
+        structure.delete_section("{S1}", include_pages=True)
+    assert _deletes(app) == []
+
+
+def test_delete_nonempty_group_needs_flag(app):
+    assert "include_contents=true" in _bad_request(lambda: structure.delete_section_group("{G}"))
+    structure.delete_section_group("{G}", include_contents=True)
+    assert _deletes(app) == ["{G}"]
+
+
+def test_delete_needs_matching_kind(app):
+    assert "is not a section id" in _bad_request(lambda: structure.delete_section("{G}"))
+    assert "is not a page id" in _bad_request(lambda: structure.delete_page("{S1}"))
+
+
+def test_delete_refused_outside_allowlist(app, monkeypatch):
+    monkeypatch.setenv("ONENOTE_ALLOWED_NOTEBOOKS", "Spike")
+    assert "not in an allowed notebook" in _bad_request(lambda: structure.delete_section("{SX}"))
+    assert _deletes(app) == []

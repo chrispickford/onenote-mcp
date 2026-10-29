@@ -17,7 +17,7 @@ import xml.etree.ElementTree as ET
 
 import comtypes
 
-from onenote_mcp import com, hierarchy
+from onenote_mcp import backups, com, hierarchy
 from onenote_mcp.errors import OneNoteError
 
 _ONE_NS = "http://schemas.microsoft.com/office/onenote/2013/onenote"
@@ -363,3 +363,84 @@ def move_page(page_id: str, target_section_id: str, after_page_id: str | None = 
     moving to another section changes the page's ID.
     """
     return _run(_move_page_impl, page_id, target_section_id, after_page_id, level, what="move_page")
+
+
+
+# ---- Delete ---------------------------------------------------------------------------
+# DeleteHierarchy(id, 0.0, False) moves the object to the notebook's OneNote
+# recycle bin (deletePermanently=False).  Every page is backed up first; if any
+# backup fails, nothing is deleted.
+
+def _object_of_kind(app, object_id: str, tag: str, what: str) -> tuple[ET.Element, ET.Element]:
+    com._ensure_allowed(app, object_id, what.capitalize())
+    root = _tree(app)
+    el = hierarchy.find_object(root, object_id)
+    if el is None or el.tag != _q(tag) or el.get("isRecycleBin") == "true":
+        raise OneNoteError(f"{object_id!r} is not a {what} id.", code="bad_request")
+    return root, el
+
+
+def _has_recycle_bin(app, notebook_id: str) -> bool:
+    """Whether the notebook now has OneNote's recycle bin, where deletes go."""
+    notebook = hierarchy.find_object(_tree(app), notebook_id)
+    return notebook is not None and any(g.get("isRecycleBin") == "true" for g in notebook.iter(_q("SectionGroup")))
+
+
+def _delete_page_impl(page_id: str) -> dict:
+    app = com._app()
+    root, el = _object_of_kind(app, page_id, "Page", "page")
+    notebook_id = hierarchy.notebook_of(root, el).get("ID")
+    backup_id = com._backup(app, page_id, "delete_page")
+    app.DeleteHierarchy(page_id, 0.0, False)
+    com.pagestate.forget(page_id)
+    return {"backup_id": backup_id, "recycle_bin": _has_recycle_bin(app, notebook_id)}
+
+
+def delete_page(page_id: str) -> dict:
+    """Delete a page (into OneNote's recycle bin), backing it up first.
+
+    Returns {"backup_id", "recycle_bin"}.
+    """
+    return _run(_delete_page_impl, page_id, what="delete_page")
+
+
+def _delete_container_impl(object_id: str, tag: str, include: bool) -> dict:
+    what = _KIND_NAMES[tag]
+    app = com._app()
+    root, el = _object_of_kind(app, object_id, tag, what)
+    pages = [page.get("ID") for page in el.iter(_q("Page"))]
+    if tag == "Section" and pages and not include:
+        raise OneNoteError(
+            f"Section has {len(pages)} pages; pass include_pages=true to delete them too.", code="bad_request",
+        )
+    if tag == "SectionGroup" and len(el) and not include:
+        raise OneNoteError(
+            f"Section group {el.get('name')!r} is not empty; pass include_contents=true to delete "
+            "everything in it too.",
+            code="bad_request",
+        )
+    notebook_id = hierarchy.notebook_of(root, el).get("ID")
+    page_backups = [com._backup(app, page_id, f"delete_{tag.lower()}") for page_id in pages]
+    manifest_id = backups.save_manifest(
+        com.config.backup_dir(os.environ), object_id, ET.tostring(el, encoding="unicode"), page_backups,
+    )
+    app.DeleteHierarchy(object_id, 0.0, False)
+    for page_id in pages:
+        com.pagestate.forget(page_id)
+    return {
+        "manifest_id": manifest_id,
+        "pages_backed_up": len(page_backups),
+        "recycle_bin": _has_recycle_bin(app, notebook_id),
+    }
+
+
+def delete_section(section_id: str, include_pages: bool = False) -> dict:
+    """Delete a section (into OneNote's recycle bin). A section with pages needs
+    include_pages=True; every page is backed up first."""
+    return _run(_delete_container_impl, section_id, "Section", include_pages, what="delete_section")
+
+
+def delete_section_group(group_id: str, include_contents: bool = False) -> dict:
+    """Delete a section group (into OneNote's recycle bin). A non-empty group needs
+    include_contents=True; every page in it is backed up first."""
+    return _run(_delete_container_impl, group_id, "SectionGroup", include_contents, what="delete_section_group")

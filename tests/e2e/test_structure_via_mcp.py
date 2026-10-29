@@ -103,3 +103,31 @@ def test_rename_move_and_reorder(mcp_session, claudespike_section_id):
 
     with pytest.raises(RuntimeError, match="into itself"):
         mcp_session.call_tool("move_section_group", {"group_id": group["id"], "new_parent_id": group["id"]})
+
+
+@pytest.mark.e2e
+def test_delete_page_section_and_group(mcp_session, claudespike_section_id):
+    stamp = int(time.time())
+    spike = _spike(mcp_session)
+    group = mcp_session.call_tool("create_section_group", {"parent_id": spike["id"], "name": f"Delete {stamp}"})
+    section = mcp_session.call_tool("create_section", {"parent_id": group["id"], "name": "Doomed"})
+    keep = mcp_session.call_tool("create_page", {"section_id": section["id"], "title": "Keep me"})
+    gone = mcp_session.call_tool("create_page", {"section_id": section["id"], "title": "Delete me"})
+
+    result = mcp_session.call_tool("delete_page", {"page_id": gone})
+    assert result["backup_id"] and result["recycle_bin"] is True
+    assert [p["id"] for p in mcp_session.call_tool("list_pages", {"section_id": section["id"]})] == [keep]
+
+    with pytest.raises(RuntimeError, match="Section has 1 pages; pass include_pages=true"):
+        mcp_session.call_tool("delete_section", {"section_id": section["id"]})
+    with pytest.raises(RuntimeError, match="include_contents=true"):
+        mcp_session.call_tool("delete_section_group", {"group_id": group["id"]})
+
+    deleted = mcp_session.call_tool("delete_section_group", {"group_id": group["id"], "include_contents": True})
+    assert deleted["pages_backed_up"] == 1
+    assert group["id"] not in [g["id"] for g in _spike(mcp_session).get("section_groups", [])]
+
+    # The deleted page comes back from its backup into another section.
+    restored = mcp_session.call_tool("restore_page", {"backup_id": result["backup_id"], "target_section_id": claudespike_section_id})
+    assert restored["restored_over"] is False
+    assert mcp_session.call_tool("get_page", {"page_id": restored["page_id"]})["title"] == "Delete me"

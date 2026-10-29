@@ -168,6 +168,9 @@ pick a page → read/write tools below.
 | `move_page` | Move a page into another section (it gets a **new id**, returned) or within its section, at a given level. Subpages are not moved along. |
 | `set_page_level` | Make a page top-level (1) or a subpage (2, 3) of the page above it. |
 | `reorder_pages` | Put all of a section's pages in a new order, keeping their levels. |
+| `delete_page` | Delete a page into OneNote's recycle bin, backing it up first. |
+| `delete_section` | Delete a section into the recycle bin; one with pages needs `include_pages: true`. Every page is backed up first, and nothing is deleted if a backup fails. |
+| `delete_section_group` | Delete a section group into the recycle bin; a non-empty one needs `include_contents: true`. Pages are backed up as for sections. |
 
 New notebooks must be allowed by `ONENOTE_ALLOWED_NOTEBOOKS` when it is set (list
 their name or path there first).

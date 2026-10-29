@@ -924,6 +924,51 @@ async def reorder_pages(section_id: str, page_ids: list[str]) -> str:
 
 
 @_tool()
+async def delete_page(page_id: str) -> dict:
+    """Delete a page. It goes to the notebook's OneNote recycle bin, and is backed up
+    locally first (restore_page with target_section_id brings it back).
+
+    Returns {"backup_id", "recycle_bin": true|false}.
+    """
+    try:
+        return await asyncio.to_thread(structure.delete_page, page_id)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def delete_section(section_id: str, include_pages: bool = False) -> dict:
+    """Delete a section into the notebook's OneNote recycle bin.
+
+    A section that still has pages is refused unless include_pages is true; every
+    page is backed up locally first, and if any backup fails nothing is deleted.
+    OneNote's recycle bin is the easiest way to undo; restore_page brings back
+    single pages from the backups.
+
+    Returns {"manifest_id", "pages_backed_up", "recycle_bin"}.
+    """
+    try:
+        return await asyncio.to_thread(structure.delete_section, section_id, include_pages)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def delete_section_group(group_id: str, include_contents: bool = False) -> dict:
+    """Delete a section group into the notebook's OneNote recycle bin.
+
+    A group that is not empty is refused unless include_contents is true; every page
+    in it is backed up locally first, and if any backup fails nothing is deleted.
+
+    Returns {"manifest_id", "pages_backed_up", "recycle_bin"}.
+    """
+    try:
+        return await asyncio.to_thread(structure.delete_section_group, group_id, include_contents)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
 async def list_backups(page_id: str | None = None, section_id: str | None = None, since: str | None = None) -> list[dict]:
     """List the local page backups, newest first.
 

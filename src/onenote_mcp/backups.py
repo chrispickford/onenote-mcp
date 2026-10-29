@@ -222,3 +222,32 @@ def restorable_xml(
     for el in page_root.iter():
         el.attrib.pop("objectID", None)
     return ET.tostring(page_root, encoding="unicode", xml_declaration=False)
+
+
+# ---- Manifests of deleted sections and section groups ------------------------------
+#
+# A manifest records what a section or section-group delete removed: the
+# hierarchy XML of the deleted object and the backup IDs of its pages.  They
+# live in <root>/manifests/<manifest_id>.json, apart from the page backups.
+
+def save_manifest(root: Path, deleted_id: str, hierarchy_xml: str, page_backup_ids: list[str]) -> str:
+    """Record a section or section-group delete; return the manifest_id."""
+    stamp = _next_stamp()
+    manifest_id = f"{stamp.strftime('%Y%m%dT%H%M%S%f')}-{hashlib.sha1(deleted_id.encode()).hexdigest()[:8]}"
+    folder = Path(root) / "manifests"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / f"{manifest_id}.json").write_text(json.dumps({
+        "deleted_id": deleted_id,
+        "created": stamp.strftime(_TIME_FORMAT),
+        "hierarchy_xml": hierarchy_xml,
+        "page_backups": page_backup_ids,
+    }, indent=2), encoding="utf-8")
+    return manifest_id
+
+
+def load_manifest(root: Path, manifest_id: str) -> dict:
+    """Return a manifest saved by save_manifest; bad_request if unknown."""
+    path = Path(root) / "manifests" / f"{manifest_id}.json"
+    if not _BACKUP_ID.match(manifest_id or "") or not path.is_file():
+        raise OneNoteError(f"Unknown manifest {manifest_id!r}.", code="bad_request")
+    return json.loads(path.read_text(encoding="utf-8"))
