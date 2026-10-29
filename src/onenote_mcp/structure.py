@@ -198,3 +198,168 @@ def _close_notebook_impl(notebook_id: str, force: bool) -> str:
 def close_notebook(notebook_id: str, force: bool = False) -> str:
     """Close a notebook in OneNote (its files stay where they are)."""
     return _run(_close_notebook_impl, notebook_id, force, what="close_notebook")
+
+
+# ---- Rename ---------------------------------------------------------------------------
+
+_KIND_NAMES = {"Notebook": "notebook", "SectionGroup": "section group", "Section": "section"}
+
+
+def _rename_impl(object_id: str, name: str) -> str:
+    app = com._app()
+    com._ensure_allowed(app, object_id, "Object")
+    root = _tree(app)
+    el = hierarchy.find_object(root, object_id)
+    local = el.tag.split("}")[1]
+    if local == "Page":
+        raise OneNoteError("Use rename_page to rename a page.", code="bad_request")
+    if local == "Section" and name.lower().endswith(".one"):
+        name = _check_name(name[:-4], "section")
+    if local != "Notebook":
+        parent = hierarchy.parent_map(root)[el]
+        siblings = [child for child in parent.findall(el.tag) if child is not el]
+        if any(child.get("name", "").lower() == name.lower() for child in siblings):
+            raise OneNoteError(
+                f"{parent.get('name')!r} already has a {_KIND_NAMES[local]} named {name!r}.", code="bad_request",
+            )
+    app.UpdateHierarchy(hierarchy.rename_xml(root, object_id, name))
+    return "ok"
+
+
+def rename(object_id: str, name: str) -> str:
+    """Rename a notebook (its display name), section group or section."""
+    return _run(_rename_impl, object_id, _check_name(name, "new"), what="rename")
+
+
+# ---- Move and reorder -------------------------------------------------------------
+
+def _ordered_with(ids: list[str], moved: str, before_id: str | None, after_id: str | None) -> list[str]:
+    """Return *ids* without *moved*, then with it inserted before/after an id (default: at the end)."""
+    ordered = [object_id for object_id in ids if object_id != moved]
+    anchor = before_id or after_id
+    if anchor is None:
+        return [*ordered, moved]
+    if anchor not in ordered:
+        raise OneNoteError(f"{anchor!r} is not a sibling at the target.", code="bad_request")
+    index = ordered.index(anchor) + (0 if before_id is not None else 1)
+    return [*ordered[:index], moved, *ordered[index:]]
+
+
+def _move_container_child_impl(
+    object_id: str, new_parent_id: str, before_id: str | None, after_id: str | None, tag: str,
+) -> str:
+    app = com._app()
+    com._ensure_allowed(app, object_id, _KIND_NAMES[tag].capitalize())
+    _container(app, new_parent_id)
+    root = _tree(app)
+    moved = hierarchy.find_object(root, object_id)
+    if moved is None or moved.tag != _q(tag):
+        raise OneNoteError(f"{object_id!r} is not a {_KIND_NAMES[tag]} id.", code="bad_request")
+    if any(el.get("ID") == new_parent_id for el in moved.iter()):
+        raise OneNoteError(f"Cannot move {_KIND_NAMES[tag]} {object_id!r} into itself.", code="bad_request")
+    target = hierarchy.find_object(root, new_parent_id)
+    siblings = [child for child in target.findall(_q(tag)) if child.get("ID") != object_id]
+    if any(child.get("name", "").lower() == moved.get("name", "").lower() for child in siblings):
+        raise OneNoteError(
+            f"{target.get('name')!r} already has a {_KIND_NAMES[tag]} named {moved.get('name')!r}.",
+            code="bad_request",
+        )
+    ordered = _ordered_with([child.get("ID") for child in target.findall(_q(tag))], object_id, before_id, after_id)
+    app.UpdateHierarchy(hierarchy.order_xml(target, tag, ordered))
+    return "ok"
+
+
+def _check_one_anchor(before_id: str | None, after_id: str | None) -> None:
+    if before_id is not None and after_id is not None:
+        raise OneNoteError("Give at most one of before_id and after_id.", code="bad_request")
+
+
+def move_section(section_id: str, new_parent_id: str, after_id: str | None = None, before_id: str | None = None) -> str:
+    """Move a section into a notebook or section group, optionally next to a sibling section."""
+    _check_one_anchor(before_id, after_id)
+    return _run(_move_container_child_impl, section_id, new_parent_id, before_id, after_id, "Section",
+                what="move_section")
+
+
+def move_section_group(group_id: str, new_parent_id: str, after_id: str | None = None, before_id: str | None = None) -> str:
+    """Move a section group into a notebook or another section group."""
+    _check_one_anchor(before_id, after_id)
+    return _run(_move_container_child_impl, group_id, new_parent_id, before_id, after_id, "SectionGroup",
+                what="move_section_group")
+
+
+def _section_pages(app, section_id: str) -> tuple[ET.Element, list[str], dict[str, int]]:
+    section = ET.fromstring(app.GetHierarchy(section_id, 4))
+    if section.tag != _q("Section"):
+        raise OneNoteError(f"{section_id!r} is not a section id.", code="bad_request")
+    pages = section.findall(_q("Page"))
+    return section, [p.get("ID") for p in pages], {p.get("ID"): int(p.get("pageLevel", "1")) for p in pages}
+
+
+def _section_of_page(app, page_id: str) -> str:
+    root = _tree(app)
+    page = hierarchy.find_object(root, page_id)
+    if page is None or page.tag != _q("Page"):
+        raise OneNoteError(f"{page_id!r} is not a page id.", code="bad_request")
+    return hierarchy.parent_map(root)[page].get("ID")
+
+
+def _write_order(app, section: ET.Element, ordered: list[str], levels: dict[str, int]) -> None:
+    hierarchy.check_page_levels([levels[page_id] for page_id in ordered])
+    app.UpdateHierarchy(hierarchy.order_xml(section, "Page", ordered, levels))
+
+
+def _reorder_pages_impl(section_id: str, page_ids: list[str]) -> str:
+    app = com._app()
+    com._ensure_allowed(app, section_id, "Section")
+    section, current, levels = _section_pages(app, section_id)
+    if sorted(page_ids) != sorted(current):
+        raise OneNoteError(
+            "page_ids must list exactly the section's pages, each once (see list_pages).", code="bad_request",
+        )
+    _write_order(app, section, page_ids, levels)
+    return "ok"
+
+
+def reorder_pages(section_id: str, page_ids: list[str]) -> str:
+    """Put a section's pages in the order of *page_ids*, keeping their levels."""
+    return _run(_reorder_pages_impl, section_id, page_ids, what="reorder_pages")
+
+
+def _set_page_level_impl(page_id: str, level: int) -> str:
+    app = com._app()
+    com._ensure_allowed(app, page_id, "Page")
+    section, current, levels = _section_pages(app, _section_of_page(app, page_id))
+    _write_order(app, section, current, {**levels, page_id: level})
+    return "ok"
+
+
+def set_page_level(page_id: str, level: int) -> str:
+    """Make a page a top-level page (1) or a subpage (2 or 3) of the page above it."""
+    return _run(_set_page_level_impl, page_id, level, what="set_page_level")
+
+
+def _move_page_impl(page_id: str, target_section_id: str, after_page_id: str | None, level: int) -> dict:
+    app = com._app()
+    com._ensure_allowed(app, page_id, "Page")
+    com._ensure_allowed(app, target_section_id, "Section")
+    source_section_id = _section_of_page(app, page_id)
+    section, current, levels = _section_pages(app, target_section_id)
+    ordered = _ordered_with(current, page_id, None, after_page_id)
+    _write_order(app, section, ordered, {**levels, page_id: level})
+    if source_section_id == target_section_id:
+        return {"page_id": page_id, "id_changed": False}
+    # Page IDs embed their section: OneNote gives a moved page a new ID.
+    _, after, _ = _section_pages(app, target_section_id)
+    new_ids = [candidate for candidate in after if candidate not in current]
+    new_id = new_ids[0] if len(new_ids) == 1 else page_id
+    return {"page_id": new_id, "id_changed": new_id != page_id}
+
+
+def move_page(page_id: str, target_section_id: str, after_page_id: str | None = None, level: int = 1) -> dict:
+    """Move a page into a section (the same one to reorder), after *after_page_id* or at the end.
+
+    Its subpages are not moved along.  Returns {"page_id", "id_changed"}:
+    moving to another section changes the page's ID.
+    """
+    return _run(_move_page_impl, page_id, target_section_id, after_page_id, level, what="move_page")

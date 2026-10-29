@@ -2,7 +2,10 @@
 lookups in hierarchy XML."""
 import xml.etree.ElementTree as ET
 
+import pytest
+
 from onenote_mcp import hierarchy
+from onenote_mcp.errors import OneNoteError
 
 _ONE_NS = "http://schemas.microsoft.com/office/onenote/2013/onenote"
 
@@ -52,3 +55,49 @@ def test_find_object_and_notebook_of():
     assert page.get("name") == "Brief"
     assert hierarchy.notebook_of(root, page).get("ID") == "{NB}"
     assert hierarchy.find_object(root, "{NOPE}") is None
+
+
+# ---------------------------------------------------------------------------
+# UpdateHierarchy XML
+# ---------------------------------------------------------------------------
+
+def _children(xml: str) -> list[tuple[str, dict]]:
+    root = ET.fromstring(xml)
+    return root.tag.split("}")[1], root.get("ID"), [(c.tag.split("}")[1], dict(c.attrib)) for c in root]
+
+
+def test_rename_section_xml():
+    root = ET.fromstring(_TREE)
+    assert _children(hierarchy.rename_xml(root, "{S2}", "Renamed")) == (
+        "SectionGroup", "{G1}", [("Section", {"ID": "{S2}", "name": "Renamed"})],
+    )
+
+
+def test_rename_notebook_sets_nickname():
+    root = ET.fromstring(_TREE)
+    tag, _, children = _children(hierarchy.rename_xml(root, "{NB}", "Display"))
+    assert tag == "Notebooks" and children == [("Notebook", {"ID": "{NB}", "nickname": "Display"})]
+
+
+def test_order_xml_lists_children_in_order_with_levels():
+    root = ET.fromstring(_TREE)
+    section = hierarchy.find_object(root, "{S2}")
+    xml = hierarchy.order_xml(section, "Page", ["{B}", "{A}"], {"{A}": 1, "{B}": 2})
+    assert _children(xml) == ("Section", "{S2}", [
+        ("Page", {"ID": "{B}", "pageLevel": "2"}), ("Page", {"ID": "{A}", "pageLevel": "1"}),
+    ])
+
+
+@pytest.mark.parametrize("levels, ok", [
+    ([1, 2, 3, 2, 1], True),
+    ([1, 3], False),
+    ([2, 1], False),
+    ([1, 2, 4], False),
+    ([], True),
+])
+def test_page_level_rules(levels, ok):
+    if ok:
+        hierarchy.check_page_levels(levels)
+    else:
+        with pytest.raises(OneNoteError):
+            hierarchy.check_page_levels(levels)

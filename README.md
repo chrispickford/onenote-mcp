@@ -163,6 +163,11 @@ pick a page → read/write tools below.
 | `close_notebook` | Close a notebook in OneNote. Notebooks cannot be deleted through OneNote; after closing, delete its files by hand if wanted. |
 | `create_section_group` | Create a section group in a notebook or another section group. |
 | `create_section` | Create a section in a notebook or section group, optionally with a tab colour. |
+| `rename` | Rename a notebook (its display name), section group or section. |
+| `move_section` / `move_section_group` | Move a section or section group into a notebook or section group, optionally next to a sibling. Ids are kept. |
+| `move_page` | Move a page into another section (it gets a **new id**, returned) or within its section, at a given level. Subpages are not moved along. |
+| `set_page_level` | Make a page top-level (1) or a subpage (2, 3) of the page above it. |
+| `reorder_pages` | Put all of a section's pages in a new order, keeping their levels. |
 
 New notebooks must be allowed by `ONENOTE_ALLOWED_NOTEBOOKS` when it is set (list
 their name or path there first).

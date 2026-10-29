@@ -842,6 +842,88 @@ async def create_section(parent_id: str, name: str, color: str | None = None) ->
 
 
 @_tool()
+async def rename(object_id: str, name: str) -> str:
+    """Rename a notebook (its display name), a section group or a section.
+
+    object_id: an id from get_notebooks. A sibling of the same kind with the same
+    name (ignoring case) is refused. Use rename_page for pages. Returns "ok".
+    """
+    try:
+        return await asyncio.to_thread(structure.rename, object_id, name)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def move_section(section_id: str, new_parent_id: str, after_id: str | None = None, before_id: str | None = None) -> str:
+    """Move a section into a notebook or section group (or reorder it within its parent).
+
+    new_parent_id: a notebook or section group id. after_id / before_id: optionally a
+    sibling section id there to place it next to; default is the end. The section and
+    its pages keep their ids. Returns "ok".
+    """
+    try:
+        return await asyncio.to_thread(structure.move_section, section_id, new_parent_id, after_id=after_id, before_id=before_id)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def move_section_group(group_id: str, new_parent_id: str, after_id: str | None = None, before_id: str | None = None) -> str:
+    """Move a section group (with everything in it) into a notebook or another section group.
+
+    after_id / before_id: optionally a sibling section group to place it next to.
+    Returns "ok".
+    """
+    try:
+        return await asyncio.to_thread(structure.move_section_group, group_id, new_parent_id, after_id=after_id, before_id=before_id)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def move_page(page_id: str, target_section_id: str, after_page_id: str | None = None, level: int = 1) -> dict:
+    """Move a page into a section, or within its section to reorder it.
+
+    after_page_id: place it after that page of the target section; default is the end.
+    level: 1 for a top-level page, 2 or 3 for a subpage of the page above it.
+    Subpages of the moved page are not moved along; move them too.
+    Moving to another section gives the page a NEW id: returns {"page_id": <its id
+    now>, "id_changed": true|false}.
+    """
+    try:
+        return await asyncio.to_thread(structure.move_page, page_id, target_section_id, after_page_id, level)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def set_page_level(page_id: str, level: int) -> str:
+    """Make a page a top-level page (level 1) or a subpage (2 or 3) of the page above it.
+
+    The first page of a section is level 1, and a page is at most one level deeper
+    than the page before it. Returns "ok".
+    """
+    try:
+        return await asyncio.to_thread(structure.set_page_level, page_id, level)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
+async def reorder_pages(section_id: str, page_ids: list[str]) -> str:
+    """Put a section's pages in a new order, keeping each page's level.
+
+    page_ids: every page id of the section (from list_pages), each once, in the new
+    order; the resulting levels must stay valid (see set_page_level). Returns "ok".
+    """
+    try:
+        return await asyncio.to_thread(structure.reorder_pages, section_id, page_ids)
+    except (OneNoteError, ValueError) as exc:
+        raise _fail(exc) from exc
+
+
+@_tool()
 async def list_backups(page_id: str | None = None, section_id: str | None = None, since: str | None = None) -> list[dict]:
     """List the local page backups, newest first.
 

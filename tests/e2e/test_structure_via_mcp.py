@@ -66,3 +66,40 @@ def test_create_notebook(claudespike_section_id, monkeypatch):
     section = structure.create_section(created["id"], "First")
     assert section["name"] == "First"
     assert structure.close_notebook(created["id"]) == "ok"
+
+
+@pytest.mark.e2e
+def test_rename_move_and_reorder(mcp_session, claudespike_section_id):
+    stamp = int(time.time())
+    spike = _spike(mcp_session)
+    group = mcp_session.call_tool("create_section_group", {"parent_id": spike["id"], "name": f"Moves {stamp}"})
+    first = mcp_session.call_tool("create_section", {"parent_id": spike["id"], "name": f"First {stamp}"})
+    second = mcp_session.call_tool("create_section", {"parent_id": spike["id"], "name": f"Second {stamp}"})
+    pages = [mcp_session.call_tool("create_page", {"section_id": first["id"], "title": title}) for title in ("A", "B", "C")]
+
+    # reorder, then make B a subpage of C
+    mcp_session.call_tool("reorder_pages", {"section_id": first["id"], "page_ids": [pages[2], pages[0], pages[1]]})
+    mcp_session.call_tool("set_page_level", {"page_id": pages[1], "level": 2})
+    listed = mcp_session.call_tool("list_pages", {"section_id": first["id"]})
+    assert [(p["name"], p["level"]) for p in listed] == [("C", 1), ("A", 1), ("B", 2)]
+
+    # move page A into the second section: new id, content kept
+    moved = mcp_session.call_tool("move_page", {"page_id": pages[0], "target_section_id": second["id"]})
+    assert moved["id_changed"] is True
+    assert [p["id"] for p in mcp_session.call_tool("list_pages", {"section_id": second["id"]})] == [moved["page_id"]]
+    assert mcp_session.call_tool("get_page", {"page_id": moved["page_id"]})["title"] == "A"
+
+    # rename and move the first section into the group
+    mcp_session.call_tool("rename", {"object_id": first["id"], "name": f"Renamed {stamp}"})
+    mcp_session.call_tool("move_section", {"section_id": first["id"], "new_parent_id": group["id"]})
+    tree = _group(_spike(mcp_session), group["id"])
+    (inside,) = tree["sections"]
+    assert inside["name"] == f"Renamed {stamp}"
+    after_move = mcp_session.call_tool("list_pages", {"section_id": inside["id"]})
+    assert [p["name"] for p in after_move] == ["C", "B"]
+    # Moving a section keeps its id and its pages' ids (verified against OneNote 16.0.20527).
+    assert inside["id"] == first["id"]
+    assert [p["id"] for p in after_move] == [pages[2], pages[1]]
+
+    with pytest.raises(RuntimeError, match="into itself"):
+        mcp_session.call_tool("move_section_group", {"group_id": group["id"], "new_parent_id": group["id"]})
