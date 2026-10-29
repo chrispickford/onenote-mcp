@@ -51,7 +51,7 @@ import comtypes
 import comtypes.client
 import comtypes.typeinfo
 
-from onenote_mcp import backups, config, pagestate
+from onenote_mcp import backups, config, hierarchy, pagestate
 from onenote_mcp.builders import UNSUPPORTED_PAGE_OBJECT_TAGS, protected_items
 from onenote_mcp.images import pixel_size
 
@@ -552,18 +552,14 @@ def _ensure_allowed(app, object_id: str, kind: str) -> None:
     if allowed is None:
         return
     root = ET.fromstring(app.GetHierarchy("", 4))  # scope 4 = full tree
-    target = next((el for el in root.iter() if el.get("ID") == object_id), None)
+    target = hierarchy.find_object(root, object_id)
     if target is None:
         raise OneNoteError(
             f"{kind} {object_id!r} was not found in any open notebook.",
             code="bad_request",
         )
-    parent_of = {child: parent for parent in root.iter() for child in parent}
-    nb_tag = f"{{{_ONE_NS}}}Notebook"
-    cur = target
-    while cur is not None and cur.tag != nb_tag:
-        cur = parent_of.get(cur)
-    if cur is None or not _notebook_allowed(cur, allowed):
+    notebook = hierarchy.notebook_of(root, target)
+    if notebook is None or not _notebook_allowed(notebook, allowed):
         raise OneNoteError(
             f"{kind} {object_id!r} is not in an allowed notebook — access is "
             "restricted by ONENOTE_ALLOWED_NOTEBOOKS.",

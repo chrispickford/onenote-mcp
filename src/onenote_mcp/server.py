@@ -31,6 +31,7 @@ from collections.abc import Callable
 from mcp.server.fastmcp import FastMCP
 
 from onenote_mcp import config, pagestate
+from onenote_mcp.hierarchy import parse_notebook_tree
 from onenote_mcp.com import (
     OneNoteError,
     allowlist_config_error as _allowlist_config_error_com,
@@ -50,7 +51,7 @@ from onenote_mcp.com import (
 from onenote_mcp.models import FloatingImage, Outline, PageContent
 from onenote_mcp.builders import (
     UNSUPPORTED_PAGE_OBJECT_TAGS,
-    build_page_xml, build_append_xml, parse_notebook_skeleton, parse_section_pages, parse_page,
+    build_page_xml, build_append_xml, parse_section_pages, parse_page,
 )
 
 # Tool functions in definition order; create_server registers them.
@@ -156,7 +157,7 @@ async def get_image_data(handle: str) -> str:
 
 @_tool()
 async def get_notebooks() -> list[dict]:
-    """Return open notebooks and their sections (no pages) — the navigation skeleton.
+    """Return open notebooks with their section groups and sections (no pages) — the navigation skeleton.
 
     This is the first step for navigating to content. It is deliberately small:
     it returns every notebook with its sections but NO pages, so you can locate
@@ -168,10 +169,19 @@ async def get_notebooks() -> list[dict]:
         "id": "<notebook-id>",
         "name": "Notebook Name",
         "sections": [
-          {"id": "<section-id>", "name": "Section Name"}
+          {"id": "<section-id>", "name": "Section Name", "color": "#RRGGBB"}
+        ],
+        "section_groups": [
+          {"id": "<group-id>", "name": "Group Name",
+           "sections": [...], "section_groups": [...]}
         ]
       }
     ]
+
+    A notebook's (or group's) "sections" lists only the sections directly in
+    it; sections inside a section group appear under that group, so walking the
+    tree lists each section once. "section_groups" is omitted when there are
+    none. OneNote's recycle bin is not listed.
 
     Workflow:
       1. get_notebooks() — find the section you want (e.g. "Templates") and its id.
@@ -185,7 +195,7 @@ async def get_notebooks() -> list[dict]:
     """
     try:
         xml = await asyncio.to_thread(_list_sections_com)
-        return parse_notebook_skeleton(xml)
+        return parse_notebook_tree(xml)
     except (OneNoteError, ValueError) as exc:
         raise _fail(exc) from exc
 

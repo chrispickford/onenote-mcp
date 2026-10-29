@@ -10,6 +10,8 @@ import xml.etree.ElementTree as ET
 
 import pytest
 
+from tests.e2e.helpers import without_ids
+
 from tests.e2e.mcp_client import mcp_session  # noqa: F401 (re-export fixture)
 
 _ONE_NS = "http://schemas.microsoft.com/office/onenote/2013/onenote"
@@ -36,7 +38,7 @@ def test_image_placeholder_reserves_its_size_and_round_trips(mcp_session, claude
     }) == "ok"
 
     (outline,) = mcp_session.call_tool("get_page", {"page_id": page_id})["outlines"]
-    assert outline["items"] == _approx_items(items)
+    assert without_ids(outline["items"]) == _approx_items(items)
     # The box takes its full height on the page, below the label line.
     assert 250.0 < outline["height"] < 300.0
 
@@ -54,4 +56,4 @@ def test_image_placeholder_reserves_its_size_and_round_trips(mcp_session, claude
         "page_id": page_id, "title": title, "outlines": [outline],
     }) == "ok"
     (reread,) = mcp_session.call_tool("get_page", {"page_id": page_id})["outlines"]
-    assert reread["items"] == _approx_items(items)
+    assert without_ids(reread["items"]) == _approx_items(items)

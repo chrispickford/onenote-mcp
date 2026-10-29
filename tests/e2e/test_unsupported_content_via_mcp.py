@@ -14,6 +14,8 @@ import time
 
 import pytest
 
+from tests.e2e.helpers import without_ids
+
 from tests.e2e.mcp_client import mcp_session  # noqa: F401 (re-export fixture)
 
 _ONE_NS = "http://schemas.microsoft.com/office/onenote/2013/onenote"
@@ -60,7 +62,7 @@ def test_get_page_reports_table_and_indented_paragraph(mcp_session, claudespike_
     table, parent = mcp_session.call_tool("get_page", {"page_id": page_id})["outlines"][0]["items"]
     assert table.pop("id")
     assert table == {"type": "unsupported", "kind": "table", "text": "A1 | B1\nA2 | B2"}
-    assert parent == _PARENT
+    assert without_ids(parent) == _PARENT
 
 
 @pytest.mark.e2e
@@ -87,7 +89,7 @@ def test_replace_page_refuses_to_drop_the_table(mcp_session, claudespike_section
         "page_id": page_id, "title": title, "outlines": [{"items": [_PARENT]}], "remove_ids": [table_id],
     })
     assert result == "ok", f"replace_page returned {result!r}"
-    assert mcp_session.call_tool("get_page", {"page_id": page_id})["outlines"][0]["items"] == [_PARENT]
+    assert without_ids(mcp_session.call_tool("get_page", {"page_id": page_id})["outlines"][0]["items"]) == [_PARENT]
 
 
 def _without_z(page_object: dict) -> dict:
@@ -127,7 +129,7 @@ def test_replace_page_keeps_a_file_attached_to_the_canvas(mcp_session, claudespi
     })
     assert result == "ok", f"replace_page returned {result!r}"
     content = mcp_session.call_tool("get_page", {"page_id": page_id})
-    assert [outline["items"] for outline in content["outlines"]] == [new_items]
+    assert [without_ids(outline["items"]) for outline in content["outlines"]] == [new_items]
     # Same place and size; OneNote renumbers the stacking order (z) once the
     # outline below the file is deleted.
     (kept,) = content["unsupported"]

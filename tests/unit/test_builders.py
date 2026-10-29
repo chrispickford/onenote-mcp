@@ -403,7 +403,7 @@ _ONE_NS_URI = "http://schemas.microsoft.com/office/onenote/2013/onenote"
 _XMLNS = f'xmlns:one="{_ONE_NS_URI}"'
 
 
-def test_parse_notebook_skeleton_includes_sections_not_pages():
+def test_parse_notebook_tree_includes_sections_not_pages():
     xml = (
         '<one:Notebooks xmlns:one="http://schemas.microsoft.com/office/onenote/2013/onenote">'
         '<one:Notebook ID="nb1" name="Work">'
@@ -413,8 +413,8 @@ def test_parse_notebook_skeleton_includes_sections_not_pages():
         '<one:Notebook ID="nb2" name="Personal"/>'
         '</one:Notebooks>'
     )
-    from onenote_mcp.builders import parse_notebook_skeleton
-    result = parse_notebook_skeleton(xml)
+    from onenote_mcp.hierarchy import parse_notebook_tree
+    result = parse_notebook_tree(xml)
     assert result == [
         {"id": "nb1", "name": "Work", "sections": [
             {"id": "sec1", "name": "S1"},
@@ -424,10 +424,10 @@ def test_parse_notebook_skeleton_includes_sections_not_pages():
     ]
 
 
-def test_parse_notebook_skeleton_empty():
+def test_parse_notebook_tree_empty():
     xml = '<one:Notebooks xmlns:one="http://schemas.microsoft.com/office/onenote/2013/onenote"/>'
-    from onenote_mcp.builders import parse_notebook_skeleton
-    assert parse_notebook_skeleton(xml) == []
+    from onenote_mcp.hierarchy import parse_notebook_tree
+    assert parse_notebook_tree(xml) == []
 
 
 def test_parse_section_pages_returns_id_name_and_level():
@@ -1905,3 +1905,31 @@ def test_unsupported_item_reports_its_object_id():
            '</one:OE></one:OEChildren></one:Outline></one:Page>')
     (item,) = parse_page(xml).outlines[0].items
     assert item.type == "unsupported" and item.id == "{X}{1}{B0}"
+
+
+def test_parse_page_reports_oe_ids():
+    from onenote_mcp.builders import parse_page
+    ns = "http://schemas.microsoft.com/office/onenote/2013/onenote"
+    xml = (f'<one:Page xmlns:one="{ns}"><one:Title><one:OE><one:T>t</one:T></one:OE></one:Title>'
+           '<one:Outline objectID="{O}"><one:OEChildren>'
+           '<one:OE objectID="{P1}"><one:T>para</one:T><one:OEChildren>'
+           '<one:OE objectID="{C1}"><one:T>child</one:T></one:OE></one:OEChildren></one:OE>'
+           '<one:OE objectID="{L1}"><one:List><one:Bullet bullet="2"/></one:List><one:T>item</one:T></one:OE>'
+           '<one:OE objectID="{I1}"><one:Image><one:Data>mcpref:abc</one:Data></one:Image></one:OE>'
+           '</one:OEChildren></one:Outline>'
+           '<one:Image objectID="{F1}"><one:Data>mcpref:def</one:Data></one:Image></one:Page>')
+    page = parse_page(xml)
+    outline = page.outlines[0]
+    para, lst, img = outline.items
+    assert outline.id == "{O}"
+    assert para.id == "{P1}" and para.children[0].id == "{C1}"
+    assert lst.items[0].id == "{L1}"
+    assert img.id == "{I1}"
+    assert page.images[0].id == "{F1}"
+
+
+def test_ids_omitted_from_write_xml():
+    from onenote_mcp.builders import build_page_xml
+    from onenote_mcp.models import Outline, Paragraph
+    xml = build_page_xml("t", [Outline(items=[Paragraph(type="paragraph", text="x", id="{P1}")])])
+    assert "{P1}" not in xml

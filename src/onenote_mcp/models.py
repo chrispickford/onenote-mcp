@@ -17,6 +17,11 @@ FONT_FAMILY_PATTERN = r"^[A-Za-z0-9 ,.\-]+$"
 FONT_FAMILY_MAX_LENGTH = 64
 
 HexColor = Annotated[str, StringConstraints(pattern=HEX_COLOR_PATTERN)]
+
+_ID_DESCRIPTION = (
+    "Read-only: OneNote objectID of this item, for the targeted edit tools. "
+    "Ignored when writing, so items copied from get_page can be passed back unchanged."
+)
 FontFamily = Annotated[
     str, StringConstraints(pattern=FONT_FAMILY_PATTERN, max_length=FONT_FAMILY_MAX_LENGTH)
 ]
@@ -40,6 +45,7 @@ class Paragraph(BaseModel):
     """A text paragraph."""
 
     type: Literal["paragraph"]
+    id: str | None = Field(None, description=_ID_DESCRIPTION)
     text: str | None = Field(None, description="Plain text for a uniformly styled paragraph. Mutually exclusive with 'segments' — provide exactly one.")
     segments: list[TextRun] | None = Field(None, description="Formatted text runs for mixed inline formatting. Mutually exclusive with 'text' — provide exactly one. Whole-paragraph formatting fields (bold, color, etc.) are ignored when segments is set.")
     style: Literal["normal", "h1", "h2", "h3", "h4", "h5", "h6"] = Field("normal", description="Heading style. 'normal' for body text, 'h1'–'h6' for headings.")
@@ -66,6 +72,7 @@ class ImagePlaceholder(BaseModel):
     """A screenshot placeholder: a highlighted label above a light box reserving the screenshot's space."""
 
     type: Literal["image_placeholder"]
+    id: str | None = Field(None, description=_ID_DESCRIPTION)
     description: str = Field(description="What the user should paste here, in the user's language, e.g. 'Screenshot of the login screen'. Shown verbatim as the label.")
     width: float | None = Field(None, gt=0, description="Box width in points. Give both width and height, or neither for the label alone.")
     height: float | None = Field(None, gt=0, description="Box height in points. Give both width and height, or neither for the label alone.")
@@ -81,6 +88,7 @@ class InlineImage(BaseModel):
     """An image embedded inside an outline (e.g. a pasted screenshot)."""
 
     type: Literal["inline_image"]
+    id: str | None = Field(None, description=_ID_DESCRIPTION)
     handle: str = Field(description="Image handle from a get_page response, e.g. 'mcpref:a1b2c3d4e5f6'. Must start with 'mcpref:'.")
     width: float | None = Field(None, description="Display width in points. Give only width or only height to scale proportionally; omit both for the natural size.")
     height: float | None = Field(None, description="Display height in points. Give only width or only height to scale proportionally; omit both for the natural size.")
@@ -97,6 +105,7 @@ class InlineImage(BaseModel):
 class ListItem(BaseModel):
     """A single list item (supports nesting via children)."""
 
+    id: str | None = Field(None, description=_ID_DESCRIPTION)
     text: str | None = Field(None, description="Plain text for this list item. Mutually exclusive with 'segments' — provide exactly one.")
     segments: list[TextRun] | None = Field(None, description="Formatted text runs for this item. Mutually exclusive with 'text' — provide exactly one.")
     children: list[ListChild] = Field(default_factory=list, description="Content indented under this item, in order: sub-items (objects without 'type') for nested list levels, or any outline item with a 'type' (paragraph, inline_image, ...) for other indented content.")
@@ -191,6 +200,7 @@ class Position(BaseModel):
 class FloatingImage(BaseModel):
     """A floating image positioned directly on the page canvas (not inside an outline)."""
 
+    id: str | None = Field(None, description=_ID_DESCRIPTION)
     handle: str = Field(description="Image handle from a get_page response, e.g. 'mcpref:a1b2c3d4e5f6'. Must start with 'mcpref:'.")
     width: float | None = Field(None, description="Display width in points. Give only width or only height to scale proportionally; omit both for the natural size.")
     height: float | None = Field(None, description="Display height in points. Give only width or only height to scale proportionally; omit both for the natural size.")
@@ -225,10 +235,12 @@ class Outline(BaseModel):
 class PageOutline(Outline):
     """An outline as get_page reports it.
 
-    Only the read side has ``height``, so the write schemas stay unchanged; a
-    write payload that still carries it validates as an Outline without it.
+    Only the read side has ``height`` and ``id``, so the write schemas stay
+    unchanged; a write payload that still carries them validates as an Outline
+    without them.
     """
 
+    id: str | None = Field(None, description=_ID_DESCRIPTION)
     height: float | None = Field(None, description="Read-only: the outline's height in points as measured by OneNote. replace_page and append_page ignore it.")
 
 

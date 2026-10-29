@@ -5,7 +5,6 @@ The public API is two functions:
   build_append_xml(outline)        → <one:Page> without ID holding the outline (for append_page)
 
 Read-direction parsers (xml → models/dicts):
-  parse_notebook_skeleton(xml) → [{"id", "name", "sections": [...]}]
   parse_section_pages(xml)     → [{"id", "name", "level"}]
   parse_page(xml)              → PageContent
 """
@@ -775,13 +774,14 @@ def _parse_list_item(
     """
     runs = _oe_runs(oe_el, quick_style_map, _LIST_ITEM_QUICK_STYLES)
     children = _parse_list_children(oe_el, quick_style_map)
+    object_id = oe_el.get("objectID")
 
     if not runs:
-        return ListItem(text="", children=children)
+        return ListItem(id=object_id, text="", children=children)
     if len(runs) == 1 and not runs[0][1]:
-        return ListItem(text=runs[0][0], children=children)
+        return ListItem(id=object_id, text=runs[0][0], children=children)
     segments = [TextRun(text=text, **fmt) for text, fmt in runs]
-    return ListItem(segments=segments, children=children)
+    return ListItem(id=object_id, segments=segments, children=children)
 
 
 def _parse_list_children(
@@ -1137,15 +1137,21 @@ def _parse_oe(
     _with_placeholder_boxes.  Returns None for an image without a handle.  The
     OE's indented children are parsed into the item's ``children``.
     """
+    item: ContentItem | None
     if _is_placeholder_label(el):
-        return _parse_placeholder(el, box)
-    children = _parse_outline_items(_child_oes(el), quick_style_map)
-    if _unsupported_content(el) is not None:
-        return _parse_unsupported_oe(el, children)
-    img_el = el.find(f"{{{_ONE_NS}}}Image")
-    if img_el is not None:
-        return _parse_inline_image(img_el, children)
-    return _parse_paragraph_oe(el, quick_style_map, children)
+        item = _parse_placeholder(el, box)
+    else:
+        children = _parse_outline_items(_child_oes(el), quick_style_map)
+        img_el = el.find(f"{{{_ONE_NS}}}Image")
+        if _unsupported_content(el) is not None:
+            item = _parse_unsupported_oe(el, children)
+        elif img_el is not None:
+            item = _parse_inline_image(img_el, children)
+        else:
+            item = _parse_paragraph_oe(el, quick_style_map, children)
+    if item is not None:
+        item.id = el.get("objectID")
+    return item
 
 
 def _parse_outline_items(
@@ -1184,28 +1190,6 @@ def _parse_outline_items(
 
 # ---- Public read functions --------------------------------------------------
 
-def parse_notebook_skeleton(xml: str) -> list[dict]:
-    """Parse hierarchy XML into notebooks, each with its sections (id+name, no pages).
-
-    Shape: [{"id", "name", "sections": [{"id", "name"}]}].  This is the lean
-    navigation skeleton returned by get_notebooks — small enough to fetch the
-    whole notebook/section map without pulling any pages.
-    """
-    root = ET.fromstring(xml)
-    notebooks: list[dict] = []
-    for nb_el in root.findall(f"{{{_ONE_NS}}}Notebook"):
-        sections = [
-            {"id": sec_el.get("ID", ""), "name": sec_el.get("name", "")}
-            for sec_el in nb_el.findall(f"{{{_ONE_NS}}}Section")
-        ]
-        notebooks.append({
-            "id": nb_el.get("ID", ""),
-            "name": nb_el.get("name", ""),
-            "sections": sections,
-        })
-    return notebooks
-
-
 def parse_section_pages(xml: str) -> list[dict]:
     """Parse a section-scoped hierarchy XML into its pages as [{"id", "name", "level"}].
 
@@ -1240,7 +1224,10 @@ def _parse_top_level_image(img_el: ET.Element) -> FloatingImage:
             width = float(w_str)
             height = float(h_str)
 
-    return FloatingImage(handle=handle, width=width, height=height, position=_parse_position(img_el))
+    return FloatingImage(
+        id=img_el.get("objectID"), handle=handle, width=width, height=height,
+        position=_parse_position(img_el),
+    )
 
 
 def parse_page(xml: str) -> PageContent:
@@ -1272,6 +1259,7 @@ def parse_page(xml: str) -> PageContent:
         width, height = _parse_size(outline_el)
         items = _parse_outline_items(_child_oes(outline_el), quick_style_map or None)
         outlines.append(PageOutline(
+            id=outline_el.get("objectID"),
             position=_parse_position(outline_el), width=width, height=height, items=items,
         ))
 

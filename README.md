@@ -148,7 +148,7 @@ tools even though OneNote itself is reachable.
 
 | Tool | What it does |
 | --- | --- |
-| `get_notebooks` | Open notebooks with their sections (no pages): the small navigation skeleton. |
+| `get_notebooks` | Open notebooks with their section groups and sections as a tree (no pages): the small navigation skeleton. Sections inside a section group are listed under that group. |
 | `list_pages` | The pages of one section in section order, as `{id, name, level}`. `level` is 1 for a top-level page; a page's subpages are the pages that follow it with a higher level. |
 
 The intended flow: `get_notebooks` → pick a section → `list_pages(section_id)` →
@@ -158,7 +158,7 @@ pick a page → read/write tools below.
 
 | Tool | What it does |
 | --- | --- |
-| `get_page` | A page as structured JSON: paragraphs, headings, lists, indented content, inline and floating images, plus read-only markers for [content the structured tools cannot write](#content-the-structured-tools-cannot-write). Image bytes are **not** included; images carry compact `mcpref:` handles instead. |
+| `get_page` | A page as structured JSON: paragraphs, headings, lists, indented content, inline and floating images, plus read-only markers for [content the structured tools cannot write](#content-the-structured-tools-cannot-write). Image bytes are **not** included; images carry compact `mcpref:` handles instead. Every outline and item carries its OneNote `id`, and the page its `revision`. |
 | `get_image_data` | The base64 bytes for a single image handle, fetched on demand. |
 | `validate_handles` | Check whether image handles are still writable, without writing anything. Fetches and caches the bytes of handles not cached yet, so `true` means the bytes are in hand; `false` means the handle is unknown or OneNote no longer has the image. |
 
