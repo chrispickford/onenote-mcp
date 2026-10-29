@@ -7,6 +7,16 @@ OneNote's COM automation API.
 No Azure app registration, no Microsoft Graph, no cloud authentication: the server
 talks directly to the OneNote application running on your machine.
 
+> **This is a fork** of [noelroehrig/onenote-mcp](https://github.com/noelroehrig/onenote-mcp)
+> (version 2.0.0 of the fork). It adds safer writes (page backups and restore,
+> write-before-delete replaces, a revision check against overwriting edits made in
+> OneNote, protection for content a rewrite cannot re-create, blocking overlapping
+> writes), targeted item edits, find and replace, tables, hyperlinks, tags, images
+> and attachments from files, and tools to create, rename, move and delete notebook
+> structure. It also pins OneNote's XML schema to 2013, which newer OneNote builds
+> (16.0.20527) need: they answer in a 2026 namespace by default. The upstream
+> Foreword below is the original author's.
+
 ## Foreword
 
 I'm a software developer, but not a Python developer, so I built this MCP server relying heavily on an AI coding agent. I needed a reliable MCP server to create and edit OneNote pages and couldn't find an existing solution that did this well, so I built my own. Other solutions seemed to focus on pulling page content out for search and summarization with an LLM.
@@ -419,9 +429,16 @@ Unit tests (no OneNote required):
 ```
 
 End-to-end tests drive the real MCP server against the real OneNote desktop app.
-They create pages and leave them in place. Open a notebook named **ClaudeSpike** in
-OneNote first: without it, the tests write into the first section of the first open
-notebook.
+They create pages, sections and section groups and leave them in place. They only
+ever touch a notebook named **ClaudeSpike** (the suite sets
+`ONENOTE_ALLOWED_NOTEBOOKS=ClaudeSpike`) and skip when it is not open, so create a
+throwaway ClaudeSpike notebook first. They insert files from the temp folder and
+`D:\scratch\onenote-mcp-tests\files`, and back pages up to
+`D:\scratch\onenote-mcp-tests\backups`.
+
+The notebook-creation test only runs when `ONENOTE_E2E_NOTEBOOK_LOCATION` names a
+folder or URL where it may create a notebook. OneNote cannot delete notebooks, so it
+prints the name and location of the notebook it leaves behind.
 
 ```
 .venv\Scripts\python.exe -m pytest -m e2e tests/e2e/ -v
@@ -454,9 +471,9 @@ py -m venv %TEMP%\onenote-mcp-build
 ```
 
 The smoke test speaks MCP over stdio to the exe: it checks that the exe exposes the
-same tools as the source and that `ping` answers, then starts it again with
-`ONENOTE_DISABLE_RAW_XML=1` and checks for exactly the 9 tools without the raw-XML
-ones. `--require-onenote` additionally requires a responsive OneNote and a working
+same default tools as the source (no raw-XML tools) and that `ping` answers, then
+starts it again with `ONENOTE_ENABLE_RAW_XML=1` and checks that exactly the four
+raw-XML tools are added. `--require-onenote` additionally requires a responsive OneNote and a working
 `get_notebooks`; CI runs without it because the runner has no OneNote.
 
 ## License

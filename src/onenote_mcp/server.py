@@ -164,7 +164,7 @@ async def get_image_data(handle: str) -> str:
 
 @_tool()
 async def get_notebooks() -> list[dict]:
-    """Return open notebooks with their section groups and sections (no pages) — the navigation skeleton.
+    """Return open notebooks with their section groups and sections (no pages): the navigation skeleton.
 
     This is the first step for navigating to content. It is deliberately small:
     it returns every notebook with its sections but NO pages, so you can locate
