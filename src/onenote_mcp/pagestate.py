@@ -9,9 +9,12 @@ accepts stale writes (verified against OneNote 16.0.20527).
 """
 
 import hashlib
+import os
 import re
 import threading
+import time
 
+from onenote_mcp import config
 from onenote_mcp.errors import OneNoteError
 
 # Attributes whose value changes between two reads of an unchanged page:
@@ -20,7 +23,7 @@ from onenote_mcp.errors import OneNoteError
 _VOLATILE_ATTRS = re.compile(r'\s(?:pathCache|callbackID)="[^"]*"')
 
 _REVISIONS: dict[str, str] = {}
-_LOCK = threading.Lock()
+_LOCK = threading.RLock()
 
 
 def revision(page_xml: str) -> str:
@@ -99,3 +102,56 @@ def after_write(page_id: str, *, before_xml: str, after_xml: str, checked: bool)
         remember(page_id, revision(after_xml))
     else:
         forget(page_id)
+
+
+# ---- In-flight writes ---------------------------------------------------------
+#
+# A COM call that times out keeps running on its abandoned worker thread and
+# may still complete.  A write to that page until then could interleave with
+# it or apply twice, so it is refused with 'busy'.  A stuck write stops
+# blocking once its thread ends, or after config.abandon_write_after seconds.
+
+_WRITES: dict[str, tuple[threading.Thread, float]] = {}
+
+
+def _blocking(page_id: str, abandon_after: float) -> bool:
+    entry = _WRITES.get(page_id)
+    if entry is None:
+        return False
+    thread, started = entry
+    if thread.is_alive() and time.monotonic() - started < abandon_after:
+        return True
+    del _WRITES[page_id]
+    return False
+
+
+def begin_write(page_id: str, thread: threading.Thread, abandon_after: float) -> None:
+    """Register *thread* as the write to *page_id*; busy if another still runs."""
+    with _LOCK:
+        if _blocking(page_id, abandon_after):
+            raise OneNoteError(
+                f"A previous write to this page is still running (page {page_id!r}); it timed "
+                "out but may still complete. Wait, re-read the page with get_page, then retry.",
+                code="busy",
+            )
+        _WRITES[page_id] = (thread, time.monotonic())
+
+
+def end_write(page_id: str, thread: threading.Thread) -> None:
+    """Forget the write to *page_id* if *thread* is still the registered one."""
+    with _LOCK:
+        if _WRITES.get(page_id, (None,))[0] is thread:
+            del _WRITES[page_id]
+
+
+def writes_in_flight(abandon_after: float | None = None) -> list[str]:
+    """Return the pages whose timed-out write is still running and blocking."""
+    if abandon_after is None:
+        abandon_after = config.abandon_write_after(os.environ)
+    with _LOCK:
+        return sorted(page_id for page_id in list(_WRITES) if _blocking(page_id, abandon_after))
+
+
+def clear_writes() -> None:
+    with _LOCK:
+        _WRITES.clear()

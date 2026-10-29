@@ -25,7 +25,7 @@ def onenote_responsive(monkeypatch):
 def test_ping_without_config_error(monkeypatch, onenote_responsive):
     monkeypatch.setenv("ONENOTE_ALLOWED_NOTEBOOKS", "ClaudeSpike")
     result = asyncio.run(server.ping())
-    assert result == {"server": "ok", "onenote_responsive": True, "config_error": None}
+    assert result == {"server": "ok", "onenote_responsive": True, "config_error": None, "writes_in_flight": []}
 
 
 def test_ping_reaches_onenote_and_reports_placeholder(monkeypatch, onenote_responsive):
@@ -34,3 +34,8 @@ def test_ping_reaches_onenote_and_reports_placeholder(monkeypatch, onenote_respo
     assert result["server"] == "ok"
     assert result["onenote_responsive"] is True
     assert "ONENOTE_ALLOWED_NOTEBOOKS" in result["config_error"]
+
+
+def test_ping_lists_in_flight(monkeypatch, onenote_responsive):
+    monkeypatch.setattr(server.pagestate, "writes_in_flight", lambda: ["{P}"])
+    assert asyncio.run(server.ping())["writes_in_flight"] == ["{P}"]

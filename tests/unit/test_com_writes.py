@@ -433,3 +433,18 @@ def test_restore_over_page_with_protected_items_replaces_them(monkeypatch, clean
     backup_id = backups.save(fake, "{PAGE}", "replace_page", root=_backup_dir, retention_days=30)
     com.restore_page(backup_id)
     assert _deleted(fake) == ["outline-1"]
+
+
+# ---------------------------------------------------------------------------
+# writes register as in-flight for their page
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("call", [
+    lambda: com.replace_page("{PAGE}", _NEW_PAGE, expected_revision="r"),
+    lambda: com.append_page("{PAGE}", f'<one:Outline {_XMLNS}><one:OEChildren/></one:Outline>'),
+])
+def test_page_writes_pass_their_page_as_write_page_id(monkeypatch, call):
+    seen = []
+    monkeypatch.setattr(com, "_run_com", lambda fn, *args, **kwargs: seen.append(kwargs.get("write_page_id")))
+    call()
+    assert seen == ["{PAGE}"]

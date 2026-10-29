@@ -90,7 +90,8 @@ async def ping() -> dict:
     apart from "the server is down".
 
     Returns:
-      {"server": "ok", "onenote_responsive": true|false, "config_error": null|"<message>"}
+      {"server": "ok", "onenote_responsive": true|false, "config_error": null|"<message>",
+       "writes_in_flight": [page ids]}
 
     onenote_responsive is false when OneNote does not answer a lightweight call
     within the ping timeout (it is likely showing a modal dialog or syncing).
@@ -101,12 +102,17 @@ async def ping() -> dict:
     unexpanded ${...} placeholder in ONENOTE_ALLOWED_NOTEBOOKS.  OneNote can
     still be responsive, but the notebook tools fail with config_error until the
     configuration is fixed.  Show the message to the user.
+
+    writes_in_flight lists pages whose earlier write timed out but is still
+    running in OneNote; writes to those pages fail with 'busy' until it ends
+    (or ONENOTE_ABANDON_WRITE_AFTER seconds pass).
     """
     responsive = await asyncio.to_thread(_ping_com)
     return {
         "server": "ok",
         "onenote_responsive": responsive,
         "config_error": _allowlist_config_error_com(),
+        "writes_in_flight": pagestate.writes_in_flight(),
     }
 
 

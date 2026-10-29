@@ -200,7 +200,7 @@ def _app():
     return _SchemaPinnedApp(comtypes.client.CreateObject(mod.Application))
 
 
-def _run_com(fn, *args, timeout=READ_TIMEOUT):
+def _run_com(fn, *args, timeout=READ_TIMEOUT, write_page_id: str | None = None):
     """Run fn(*args) in a fresh daemon thread with a hard timeout.
 
     A new thread is spawned per call so that a stuck call can be abandoned
@@ -215,6 +215,10 @@ def _run_com(fn, *args, timeout=READ_TIMEOUT):
     *timeout* seconds.  The worker thread is abandoned (it cannot be killed
     while blocked inside a COM call) but, being a daemon, will not keep the
     process alive.
+
+    With *write_page_id* the call is a write to that page: it is refused with
+    'busy' while an earlier write to the page is still running, and a timeout
+    says the write may still complete.
     """
     _result = [None]
     _exc_info = [None]
@@ -228,11 +232,22 @@ def _run_com(fn, *args, timeout=READ_TIMEOUT):
             _exc_info[0] = sys.exc_info()
         finally:
             comtypes.CoUninitialize()
+            if write_page_id is not None:
+                pagestate.end_write(write_page_id, threading.current_thread())
             done.set()
 
     t = threading.Thread(target=worker, daemon=True)
+    if write_page_id is not None:
+        pagestate.begin_write(write_page_id, t, config.abandon_write_after(os.environ))
     t.start()
     if not done.wait(timeout):
+        if write_page_id is not None:
+            raise OneNoteError(
+                f"OneNote did not finish the write within {timeout:.0f}s. The write may still "
+                "complete; re-read the page with get_page before retrying. OneNote is likely "
+                "showing a dialog or syncing; call ping to check whether it has recovered.",
+                code="timeout",
+            )
         raise OneNoteError(
             f"OneNote did not respond within {timeout:.0f}s — it is likely showing a "
             "dialog or syncing. Dismiss any open OneNote dialog and retry; call ping "
@@ -1043,7 +1058,7 @@ def replace_page(
     try:
         _run_com(
             _replace_page_impl, page_id, page_xml, keep_tags, expected, "replace_page", remove_ids,
-            timeout=WRITE_TIMEOUT,
+            timeout=WRITE_TIMEOUT, write_page_id=page_id,
         )
     except comtypes.COMError as exc:
         raise OneNoteError(
@@ -1075,7 +1090,10 @@ def append_page(page_id: str, content_xml: str, expected_revision: str | None = 
     """
     _parse_user_xml(content_xml, "content")
     try:
-        _run_com(_append_page_impl, page_id, content_xml, expected_revision, timeout=WRITE_TIMEOUT)
+        _run_com(
+            _append_page_impl, page_id, content_xml, expected_revision,
+            timeout=WRITE_TIMEOUT, write_page_id=page_id,
+        )
     except comtypes.COMError as exc:
         raise OneNoteError(
             f"append_page failed (page {page_id!r}): hresult={exc.hresult:#010x}"
@@ -1131,6 +1149,10 @@ def restore_page(backup_id: str, target_section_id: str | None = None) -> dict:
     when the page no longer exists.  Returns {"page_id", "restored_over",
     "missing_attachments"}."""
     try:
-        return _run_com(_restore_page_impl, backup_id, target_section_id, timeout=WRITE_TIMEOUT)
+        _, meta = backups.load(config.backup_dir(os.environ), backup_id)
+        return _run_com(
+            _restore_page_impl, backup_id, target_section_id,
+            timeout=WRITE_TIMEOUT, write_page_id=meta["page_id"],
+        )
     except comtypes.COMError as exc:
         raise OneNoteError(f"restore_page failed (backup {backup_id!r}): hresult={exc.hresult:#010x}") from exc

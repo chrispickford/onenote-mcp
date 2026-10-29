@@ -265,6 +265,7 @@ Tool errors start with a machine-readable code so clients can react without pars
 | `backend_error` | OneNote returned a COM failure (bad id, locked content, …). |
 | `bad_request` | The request itself was invalid (unknown image handle, malformed content, …). |
 | `config_error` | The server's configuration is invalid, e.g. `ONENOTE_ALLOWED_NOTEBOOKS` still contains an unexpanded `${...}` placeholder. Fix the MCP client config and restart; `ping` shows the message. |
+| `busy` | An earlier write to the same page timed out but is still running in OneNote, so this write was refused. Wait, re-read the page, then retry; `ping` lists such pages under `writes_in_flight`. |
 | `conflict` | The page changed since it was read (for example the user edited it in OneNote), so the write was refused and nothing was changed. Re-read the page with `get_page` and retry. |
 | `partial_write` | A replace wrote the new content, but some old page objects could not be deleted and are still on the page. The message lists each one's kind, object id and hresult. Read the page with `get_page` and decide how to handle them instead of retrying the replace. |
 
@@ -281,6 +282,7 @@ the Claude Desktop server entry if needed):
 | `ONENOTE_PING_TIMEOUT` | `8` | Timeout (s) for the `ping` health probe. |
 | `ONENOTE_BACKUP_DIR` | `%LOCALAPPDATA%\onenote-mcp\backups` | Folder for page backups. |
 | `ONENOTE_BACKUP_RETENTION_DAYS` | `30` | Backups older than this many days are deleted when the next backup is taken. |
+| `ONENOTE_ABANDON_WRITE_AFTER` | `300` | Seconds after which a timed-out write that is still running stops blocking further writes to its page. |
 | `ONENOTE_IMAGE_CACHE_MB` | `200` | In-memory cap for cached image bytes; least-recently-used entries are evicted beyond it. |
 | `ONENOTE_ENABLE_RAW_XML` | _(unset: raw-XML tools off)_ | `1` or `true` (any case): the four raw-XML tools (`list_hierarchy_xml`, `get_page_xml`, `replace_page_xml`, `append_page_xml`) are registered. Unset, empty, `0` or `false`: they are not. Any other value stops the server at startup with an error. Read once at startup. |
 | `ONENOTE_DISABLE_RAW_XML` | _(unset)_ | The upstream setting, still honoured: `1` or `true` keeps the raw-XML tools off even when `ONENOTE_ENABLE_RAW_XML` is set. Same accepted values. |
