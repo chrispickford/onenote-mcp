@@ -18,9 +18,9 @@ from onenote_mcp import config
 from onenote_mcp.errors import OneNoteError
 
 # Attributes whose value changes between two reads of an unchanged page:
-# InsertedFile@pathCache names a fresh temp copy, and image callback IDs are
-# per read.
-_VOLATILE_ATTRS = re.compile(r'\s(?:pathCache|callbackID)="[^"]*"')
+# InsertedFile@pathCache names a fresh temp copy, image callback IDs are per
+# read, and selected="all|partial" marks where the user's cursor is.
+_VOLATILE_ATTRS = re.compile(r'\s(?:pathCache|callbackID|selected)="[^"]*"')
 
 _REVISIONS: dict[str, str] = {}
 _LOCK = threading.RLock()

@@ -301,3 +301,64 @@ def test_set_tag_replaces_an_existing_tag():
     edits.set_tag(page, "b", Tag(kind="todo"))
     edit = edits.set_tag(page, "b", Tag(kind="important"))
     assert len(_xml(page, edit).find(f".//{q('OE')}[@objectID='b']").findall(q("Tag"))) == 1
+
+
+# ---------------------------------------------------------------------------
+# final review fixes
+# ---------------------------------------------------------------------------
+
+_WITH_CHILDREN = (
+    '<one:Outline objectID="o1"><one:OEChildren>'
+    '<one:OE objectID="p"><one:T>parent typo</one:T><one:OEChildren>'
+    '<one:OE objectID="f"><one:InsertedFile preferredName="a.pdf"/></one:OE>'
+    '<one:OE objectID="c"><one:T>child</one:T></one:OE>'
+    '</one:OEChildren></one:OE>'
+    '</one:OEChildren></one:Outline>'
+)
+
+
+def test_update_without_children_keeps_the_indented_content():
+    page = _page(_WITH_CHILDREN)
+    edit = edits.update_item(page, "p", Paragraph(type="paragraph", text="parent fixed"))
+    oe = _xml(page, edit).find(f".//{q('OE')}[@objectID='p']")
+    assert oe.find(q("T")).text == "parent fixed"
+    assert [child.get("objectID") for child in oe.find(q("OEChildren"))] == ["f", "c"]
+
+
+def test_update_with_children_refuses_to_drop_protected_content():
+    page = _page(_WITH_CHILDREN)
+    with pytest.raises(OneNoteError) as exc:
+        edits.update_item(page, "p", Paragraph(type="paragraph", text="x", children=[Paragraph(type="paragraph", text="new")]))
+    assert exc.value.code == "bad_request" and "file f" in str(exc.value)
+
+
+def test_update_with_children_replaces_plain_children():
+    body = _WITH_CHILDREN.replace('<one:OE objectID="f"><one:InsertedFile preferredName="a.pdf"/></one:OE>', "")
+    page = _page(body)
+    edit = edits.update_item(page, "p", Paragraph(type="paragraph", text="x", children=[Paragraph(type="paragraph", text="new")]))
+    oe = _xml(page, edit).find(f".//{q('OE')}[@objectID='p']")
+    assert [t.text for t in oe.find(q("OEChildren")).iter(q("T"))] == ["new"]
+
+
+_TWO_BLOCKS = (
+    '<one:Outline objectID="o1">'
+    '<one:OEChildren><one:OE objectID="a"><one:T>a</one:T></one:OE></one:OEChildren>'
+    '<one:OEChildren><one:OE objectID="b"><one:T>b</one:T></one:OE></one:OEChildren>'
+    '</one:Outline>'
+)
+
+
+def test_emptying_one_block_of_a_multi_block_outline_keeps_the_outline():
+    page = _page(_TWO_BLOCKS)
+    edit = edits.delete_items(page, ["a"])
+    assert edit.delete_outline_ids == []
+    (outline,) = _xml(page, edit).findall(q("Outline"))
+    assert [oe.get("objectID") for oe in outline.iter(q("OE"))] == ["b"]
+    assert len(outline.findall(q("OEChildren"))) == 1
+
+
+def test_insert_at_end_of_multi_block_outline_goes_last():
+    page = _page(_TWO_BLOCKS)
+    edit = edits.insert_items(page, [Paragraph(type="paragraph", text="z")], outline_id="o1")
+    texts = [t.text for t in _xml(page, edit).find(q("Outline")).iter(q("T"))]
+    assert texts == ["a", "b", "z"]

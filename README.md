@@ -319,9 +319,10 @@ from newer OneNote versions have no structured item type. `get_page` still repor
 them, so nothing disappears unnoticed:
 
 - Inside an outline, each becomes a read-only item such as
-  `{"type": "unsupported", "id": "{...}", "kind": "file", "text": "report.pdf"}`.
-  `kind` is `ink`, `file`, `media` or `unknown`; `text` is the readable text when
-  OneNote provides it (recognized handwriting, a file's name).
+  `{"type": "unsupported", "id": "{...}", "kind": "ink", "text": "recognised words"}`.
+  `kind` is `ink`, `media` or `unknown`; `text` is the readable text when OneNote
+  provides it (recognized handwriting, a recording's name). Attached files read as
+  `attachment` items instead (see below), and tables as `table` items.
 - Objects placed directly on the page canvas, such as handwriting, are listed in
   the top-level `unsupported` list with their kind, position and size.
 

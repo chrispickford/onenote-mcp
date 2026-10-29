@@ -102,3 +102,9 @@ def test_unchecked_write_over_seen_state_remembers():
     pagestate.remember("{P}", pagestate.revision(_page("a")))
     pagestate.after_write("{P}", before_xml=_page("a"), after_xml=_page("a+appended"), checked=False)
     assert pagestate.remembered("{P}") == pagestate.revision(_page("a+appended"))
+
+
+def test_revision_ignores_selection_state():
+    plain = _page("a")
+    selected = plain.replace("<one:OE><one:T>a</one:T>", '<one:OE selected="partial"><one:T selected="all">a</one:T>')
+    assert pagestate.revision(plain) == pagestate.revision(selected)

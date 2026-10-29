@@ -258,7 +258,9 @@ class Attachment(BaseModel):
     children: list[ContentItem] = Field(default_factory=list, description="Content indented one level under the attachment, in order.")
 
 
-UnsupportedKind = Literal["table", "ink", "file", "media", "unknown"]
+# 'file' occurs only on the canvas (page-level objects); attachments inside
+# outlines read as Attachment items.
+UnsupportedKind = Literal["ink", "file", "media", "unknown"]
 _UNSUPPORTED_KIND_DESCRIPTION = (
     "What the content is: 'ink' (handwriting or a drawing, including typed text "
     "that shares a line with handwriting); 'file' (an attached file); 'media' (an audio or "

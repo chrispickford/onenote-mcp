@@ -193,7 +193,7 @@ def test_list_item_children_tell_sub_items_from_content_items():
         {"text": "sub"},
         {"type": "paragraph", "text": "note"},
         {"type": "inline_image", "handle": "mcpref:abc"},
-        {"type": "unsupported", "kind": "table"},
+        {"type": "unsupported", "kind": "ink"},
     ]})
     assert [type(child) for child in item.children] == [ListItem, Paragraph, InlineImage, UnsupportedItem]
 
@@ -227,7 +227,7 @@ def test_paragraph_children_accept_any_content_item():
 # ---------------------------------------------------------------------------
 
 def test_unsupported_item_defaults():
-    item = UnsupportedItem(type="unsupported", kind="table")
+    item = UnsupportedItem(type="unsupported", kind="ink")
     assert (item.text, item.children) == ("", [])
 
 

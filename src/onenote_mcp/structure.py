@@ -70,9 +70,12 @@ def _refuse_duplicate(parent: ET.Element, tag: str, name: str, what: str) -> Non
         )
 
 
-def _run(fn, *args, what: str):
+def _run(fn, *args, what: str, write_id: str | None = None, timeout: float | None = None):
+    """Run *fn* on a COM worker.  With *write_id* the call registers as a write
+    to that page (or section), so overlapping writes are refused with 'busy'
+    and a timeout says the write may still complete."""
     try:
-        return com._run_com(fn, *args, timeout=com.WRITE_TIMEOUT)
+        return com._run_com(fn, *args, timeout=timeout or com.WRITE_TIMEOUT, write_page_id=write_id)
     except comtypes.COMError as exc:
         raise OneNoteError(f"{what} failed: hresult={exc.hresult:#010x}") from exc
 
@@ -352,17 +355,18 @@ def _move_page_impl(page_id: str, target_section_id: str, after_page_id: str | N
     # Page IDs embed their section: OneNote gives a moved page a new ID.
     _, after, _ = _section_pages(app, target_section_id)
     new_ids = [candidate for candidate in after if candidate not in current]
-    new_id = new_ids[0] if len(new_ids) == 1 else page_id
-    return {"page_id": new_id, "id_changed": new_id != page_id}
+    # More than one new page (someone else added one meanwhile): do not guess.
+    return {"page_id": new_ids[0] if len(new_ids) == 1 else None, "id_changed": True}
 
 
 def move_page(page_id: str, target_section_id: str, after_page_id: str | None = None, level: int = 1) -> dict:
     """Move a page into a section (the same one to reorder), after *after_page_id* or at the end.
 
     Its subpages are not moved along.  Returns {"page_id", "id_changed"}:
-    moving to another section changes the page's ID.
+    moving to another section changes the page's ID; page_id is None if the
+    new ID cannot be told apart (re-list the section then).
     """
-    return _run(_move_page_impl, page_id, target_section_id, after_page_id, level, what="move_page")
+    return _run(_move_page_impl, page_id, target_section_id, after_page_id, level, what="move_page", write_id=page_id)
 
 
 
@@ -401,7 +405,7 @@ def delete_page(page_id: str) -> dict:
 
     Returns {"backup_id", "recycle_bin"}.
     """
-    return _run(_delete_page_impl, page_id, what="delete_page")
+    return _run(_delete_page_impl, page_id, what="delete_page", write_id=page_id)
 
 
 def _delete_container_impl(object_id: str, tag: str, include: bool) -> dict:
@@ -437,10 +441,18 @@ def _delete_container_impl(object_id: str, tag: str, include: bool) -> dict:
 def delete_section(section_id: str, include_pages: bool = False) -> dict:
     """Delete a section (into OneNote's recycle bin). A section with pages needs
     include_pages=True; every page is backed up first."""
-    return _run(_delete_container_impl, section_id, "Section", include_pages, what="delete_section")
+    return _run(_delete_container_impl, section_id, "Section", include_pages, what="delete_section",
+                write_id=section_id, timeout=_delete_timeout())
 
 
 def delete_section_group(group_id: str, include_contents: bool = False) -> dict:
     """Delete a section group (into OneNote's recycle bin). A non-empty group needs
     include_contents=True; every page in it is backed up first."""
-    return _run(_delete_container_impl, group_id, "SectionGroup", include_contents, what="delete_section_group")
+    return _run(_delete_container_impl, group_id, "SectionGroup", include_contents, what="delete_section_group",
+                write_id=group_id, timeout=_delete_timeout())
+
+
+def _delete_timeout() -> float:
+    """Section and group deletes back up every page first, which takes long for
+    big sections: allow as long as a stuck write may block (ONENOTE_ABANDON_WRITE_AFTER)."""
+    return max(com.WRITE_TIMEOUT, com.config.abandon_write_after(os.environ))

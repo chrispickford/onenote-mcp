@@ -143,12 +143,13 @@ def _finish(page_root: ET.Element, edit: Edit) -> Edit:
     """Drop emptied OEChildren, turn emptied outlines into deletions, order the
     outlines as on the page, and refuse outlines that cannot be re-sent."""
     for outline in list(edit.outlines):
+        # The schema needs at least one OE per <one:OEChildren>; an outline may
+        # hold several blocks, and is empty only when all of them are.
+        parents = _parents(outline)
         for oe_children in [el for el in outline.iter(_q("OEChildren"))]:
-            if oe_children.find(_q("OE")) is None and oe_children is not outline.find(_q("OEChildren")):
-                parent = _parents(outline)[oe_children]
-                parent.remove(oe_children)
-        top = outline.find(_q("OEChildren"))
-        if top is None or top.find(_q("OE")) is None:
+            if oe_children.find(_q("OE")) is None:
+                parents[oe_children].remove(oe_children)
+        if outline.find(_q("OEChildren")) is None:
             edit.outlines.remove(outline)
             if outline.get("objectID"):
                 edit.delete_outline_ids.append(outline.get("objectID"))
@@ -200,8 +201,26 @@ def update_item(page_root: ET.Element, item_id: str, item: ListChild) -> Edit:
             "it can only be moved or deleted.",
             code="bad_request",
         )
+    old_children = oe.find(_q("OEChildren"))
     edit = Edit()
     new = _build(page_root, [item], _list_style_of(oe), edit)
+    if old_children is not None:
+        if new[-1].find(_q("OEChildren")) is None:
+            # No children given: what was indented under the item stays there.
+            new[-1].append(old_children)
+        else:
+            dropped = [
+                (child.get("objectID", ""), kind) for child in old_children.iter(_q("OE"))
+                if (kind := oe_content_kind(child)) is not None
+            ]
+            if dropped:
+                listed = ", ".join(f"{kind} {object_id}" for object_id, kind in dropped)
+                raise OneNoteError(
+                    f"Item {item_id!r} has content indented under it that cannot be re-created: "
+                    f"{listed}. Replacing its children would delete it; leave out 'children' to keep "
+                    "the indented content, or change it with targeted edits.",
+                    code="bad_request",
+                )
     if len(new) == 1:
         new[0].set("objectID", item_id)
     position = list(parent).index(oe)
@@ -224,8 +243,9 @@ def _anchor(
         raise OneNoteError("Give exactly one of before_id, after_id or outline_id.", code="bad_request")
     if outline_id is not None:
         outline = _find_outline(page_root, outline_id)
-        top = outline.find(_q("OEChildren"))
-        return top, len(top) if at_end else 0, outline, None
+        blocks = outline.findall(_q("OEChildren"))
+        block = blocks[-1] if at_end else blocks[0]
+        return block, len(block) if at_end else 0, outline, None
     oe, parent, outline = find_oe(page_root, before_id or after_id)
     index = list(parent).index(oe) + (0 if before_id is not None else 1)
     return parent, index, outline, oe

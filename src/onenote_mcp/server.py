@@ -277,7 +277,9 @@ async def get_page(page_id: str, include_binary: bool = False) -> dict:
               {"type": "paragraph", "text": "Indented under Parent"}]},
             {"type": "list", "style": "bullet", "items": [{"text": "Item 1"}]},
             {"type": "inline_image", "handle": "mcpref:abc...", "width": 300.0, "height": 200.0},
-            {"type": "unsupported", "kind": "table", "text": "Name | Age\\nAda | 36"}
+            {"type": "table", "rows": [[{"items": [{"type": "paragraph", "text": "Name"}]}]]},
+            {"type": "attachment", "id": "{...}", "name": "report.pdf"},
+            {"type": "unsupported", "id": "{...}", "kind": "ink", "text": "recognised words"}
           ]
         }
       ],
@@ -306,19 +308,22 @@ async def get_page(page_id: str, include_binary: bool = False) -> dict:
     Pass content["images"] verbatim to replace_page's `images` parameter to
     preserve them when rewriting a page (omit it if absent).
 
-    UNSUPPORTED CONTENT: tables, handwriting and drawings (ink), attached
-    files, audio/video recordings and content from newer OneNote versions
-    cannot be written by the structured tools. Inside outlines they appear as
-    read-only {"type": "unsupported", "kind": ..., "text": ...} items; "kind"
-    is table, ink, file, media or unknown, and "text" holds their readable
-    text when OneNote provides it (table cells one row per line, separated by
-    " | "; recognized handwriting; a file's name). replace_page and
-    append_page reject a payload that still contains such an item, because
-    rewriting the page would delete that content: remove the item from the
-    payload deliberately only if deleting it is intended. Objects placed
-    directly on the canvas (e.g. handwriting) are listed in the top-level
-    `unsupported` list instead. replace_page keeps them in place at their
-    position, so place new content where it does not overlap them.
+    TABLES are ordinary "table" items and can be written back. ATTACHMENTS read
+    back as {"type": "attachment", "id", "name"}; they cannot be re-created
+    from that, so a payload that still holds one is rejected.
+
+    UNSUPPORTED CONTENT: handwriting and drawings (ink), audio/video recordings
+    and content from newer OneNote versions cannot be written by the structured
+    tools. Inside outlines they appear as read-only {"type": "unsupported",
+    "id", "kind", "text"} items; "kind" is ink, media or unknown, and "text"
+    holds their readable text when OneNote provides it (recognized
+    handwriting, a recording's name). replace_page rejects a payload that still
+    contains such an item, and refuses a page that holds such items or
+    attachments unless each id is listed in remove_ids (deleting them on
+    purpose); to keep them, use the targeted edit tools instead. Objects placed
+    directly on the canvas (e.g. handwriting, files) are listed in the
+    top-level `unsupported` list instead. replace_page keeps them in place at
+    their position, so place new content where it does not overlap them.
 
     The returned structure is directly compatible with replace_page — you can read a
     page, modify its outlines, and pass outlines + images straight to replace_page.

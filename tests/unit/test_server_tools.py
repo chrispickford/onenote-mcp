@@ -83,11 +83,11 @@ def test_write_tool_schemas_describe_nested_and_unsupported_items(tool_name):
     defs = _input_schema(tool_name)["$defs"]
     for model in ("Paragraph", "InlineImage", "ListItem", "UnsupportedItem"):
         assert "children" in defs[model]["properties"], model
-    assert defs["UnsupportedItem"]["properties"]["kind"]["enum"] == ["table", "ink", "file", "media", "unknown"]
+    assert defs["UnsupportedItem"]["properties"]["kind"]["enum"] == ["ink", "file", "media", "unknown"]
 
 
 _UNSUPPORTED_OUTLINE = {"items": [
-    {"type": "paragraph", "text": "kept", "children": [{"type": "unsupported", "kind": "table", "text": "a | b"}]},
+    {"type": "paragraph", "text": "kept", "children": [{"type": "unsupported", "kind": "ink", "text": "a b"}]},
 ]}
 
 
@@ -98,7 +98,7 @@ _UNSUPPORTED_OUTLINE = {"items": [
 def test_write_tools_reject_unsupported_items_before_touching_onenote(monkeypatch, tool_name, com_name, arguments):
     calls = []
     monkeypatch.setattr(server, com_name, lambda *args: calls.append(args))
-    with pytest.raises(ToolError, match=r"bad_request: Cannot write an item of type 'unsupported' \(kind 'table'\)"):
+    with pytest.raises(ToolError, match=r"bad_request: Cannot write an item of type 'unsupported' \(kind 'ink'\)"):
         asyncio.run(server.create_server().call_tool(tool_name, arguments))
     assert calls == []
 

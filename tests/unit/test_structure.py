@@ -333,3 +333,25 @@ def test_delete_refused_outside_allowlist(app, monkeypatch):
     monkeypatch.setenv("ONENOTE_ALLOWED_NOTEBOOKS", "Spike")
     assert "not in an allowed notebook" in _bad_request(lambda: structure.delete_section("{SX}"))
     assert _deletes(app) == []
+
+
+def test_move_page_with_ambiguous_new_id_reports_none(app):
+    original_update = app.UpdateHierarchy
+
+    def update(xml):
+        original_update(xml)
+        app.tree = app.tree.replace('<one:Section ID="{S2}" name="Inside"/>',
+                                    '<one:Section ID="{S2}" name="Inside"><one:Page ID="{X1}"/><one:Page ID="{X2}"/></one:Section>')
+
+    app.UpdateHierarchy = update
+    assert structure.move_page("{P1}", "{S2}") == {"page_id": None, "id_changed": True}
+
+
+def test_page_structure_operations_register_as_writes(app, monkeypatch):
+    seen = []
+    monkeypatch.setattr(com, "_run_com", lambda fn, *args, **kwargs: seen.append((kwargs.get("write_page_id"), kwargs.get("timeout"))))
+    structure.delete_page("{P1}")
+    structure.move_page("{P1}", "{S2}")
+    structure.delete_section("{S1}", include_pages=True)
+    assert [page for page, _ in seen] == ["{P1}", "{P1}", "{S1}"]
+    assert seen[2][1] >= 300, "section deletes back up every page, so they get a long timeout"

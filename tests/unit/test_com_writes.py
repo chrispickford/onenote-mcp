@@ -329,7 +329,7 @@ def test_restore_over_existing_page_backs_up_then_writes_backup_content(monkeypa
 
     result = com.restore_page(backup_id)
 
-    assert result == {"page_id": "{PAGE}", "restored_over": True, "missing_attachments": ["a.pdf"]}
+    assert result == {"page_id": "{PAGE}", "restored_over": True, "missing_attachments": ["a.pdf"], "not_restored": []}
     written = ET.fromstring([arg for call, arg in fake.calls if call == "update"][-1])
     assert [t.text for t in written.iter(f"{{{_ONE_NS}}}T")] == ["Old", "a", "b"]
     assert [m["tool"] for m in backups.list_backups(_backup_dir)] == ["restore_page", "replace_page"]
@@ -639,3 +639,33 @@ def test_set_tag_needs_a_read(monkeypatch, clean_pagestate):
         com.set_tag("{PAGE}", "a", Tag(kind="todo"))
     com.set_tag("{PAGE}", "a", Tag(kind="todo"), expected_revision=pagestate.revision(_EDIT_PAGE))
     assert "Tag" in fake.calls[0][1]
+
+
+def test_restore_as_new_page_keeps_canvas_attachments_and_reports_canvas_ink(monkeypatch, clean_pagestate, _backup_dir, tmp_path):
+    cache = tmp_path / "cache.bin"
+    cache.write_bytes(b"attached")
+    page = (
+        f'<one:Page {_XMLNS} ID="{{PAGE}}"><one:Title objectID="title"><one:OE><one:T>Old</one:T></one:OE></one:Title>'
+        '<one:Outline objectID="o"><one:OEChildren><one:OE objectID="p"><one:T>body</one:T></one:OE></one:OEChildren></one:Outline>'
+        f'<one:InsertedFile objectID="canvas-file" pathCache="{cache}" pathSource="D:\\gone.txt" preferredName="gone.txt"/>'
+        '<one:InkDrawing objectID="canvas-ink"/></one:Page>'
+    )
+
+    class _App(_FakeReplaceApp):
+        def GetPageContent(self, page_id, page_info):
+            return page
+
+    fake = _App()
+    _use(monkeypatch, fake)
+    backup_id = backups.save(fake, "{PAGE}", "delete_page", root=_backup_dir, retention_days=30)
+    fake.GetHierarchy = lambda start, scope: (
+        f'<one:Notebooks {_XMLNS}><one:Notebook ID="{{NB}}" name="N"><one:Section ID="{{SEC2}}" name="S2"/>'
+        '</one:Notebook></one:Notebooks>')
+    fake.CreateNewPage = lambda section_id: "{NEWPAGE}"
+
+    result = com.restore_page(backup_id, target_section_id="{SEC2}")
+
+    written = ET.fromstring([arg for call, arg in fake.calls if call == "update"][-1])
+    (file_el,) = written.findall(f"{{{_ONE_NS}}}InsertedFile")
+    assert file_el.get("preferredName") == "gone.txt"
+    assert result["not_restored"] == ["ink"]

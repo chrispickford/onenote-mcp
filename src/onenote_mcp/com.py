@@ -1119,6 +1119,14 @@ def append_page(page_id: str, content_xml: str, expected_revision: str | None = 
         ) from exc
 
 
+# Kinds of the canvas objects a restore onto a new page cannot re-create.
+_UNSUPPORTED_PAGE_KIND = {
+    f"{{{_ONE_NS}}}InkDrawing": "ink",
+    f"{{{_ONE_NS}}}MediaFile": "media",
+    f"{{{_ONE_NS}}}FutureObject": "unknown",
+}
+
+
 def _page_exists(app, page_id: str) -> bool:
     root = ET.fromstring(app.GetHierarchy("", 4))
     return any(el.get("ID") == page_id for el in root.iter(f"{{{_ONE_NS}}}Page"))
@@ -1139,12 +1147,23 @@ def _restore_page_impl(backup_id: str, target_section_id: str | None) -> dict:
             )
         _ensure_allowed(app, target_section_id, "Section")
         page_id = app.CreateNewPage(target_section_id)
-    # Canvas objects (handwriting, files on the canvas) are never changed by a
-    # replace, so the current ones stay and the backup's copies are dropped.
-    # Everything inside outlines is restored; the protected items there are
-    # replaced deliberately.  The page's current state is backed up first, so
-    # the restore can be undone too.
-    xml = backups.restorable_xml(root, backup_id, page_xml, meta, page_id, drop_tags=UNSUPPORTED_PAGE_OBJECT_TAGS)
+    # Over an existing page, canvas objects (handwriting, files on the canvas)
+    # are never changed by a replace, so the current ones stay and the
+    # backup's copies are dropped.  On a new page there are none, so canvas
+    # files come back from the backup; canvas handwriting and recordings cannot
+    # be re-created and are reported.  Everything inside outlines is restored;
+    # protected items there are replaced deliberately.  The page's current
+    # state is backed up first, so the restore can be undone too.
+    if restored_over:
+        drop_tags = UNSUPPORTED_PAGE_OBJECT_TAGS
+    else:
+        drop_tags = UNSUPPORTED_PAGE_OBJECT_TAGS - {f"{{{_ONE_NS}}}InsertedFile"}
+    backed_up = ET.fromstring(page_xml)
+    not_restored = [] if restored_over else sorted({
+        _UNSUPPORTED_PAGE_KIND.get(child.tag, "unknown")
+        for child in backed_up if child.tag in drop_tags
+    })
+    xml = backups.restorable_xml(root, backup_id, page_xml, meta, page_id, drop_tags=drop_tags)
     # Attachments come back from the backup's own files.
     _check_insert_paths(xml, extra_roots=(str(root),))
     current_protected = frozenset(
@@ -1157,6 +1176,7 @@ def _restore_page_impl(backup_id: str, target_section_id: str | None) -> dict:
         "page_id": page_id,
         "restored_over": restored_over,
         "missing_attachments": meta.get("missing_attachments", []),
+        "not_restored": not_restored,
     }
 
 
