@@ -22,7 +22,7 @@ from html.parser import HTMLParser
 
 from onenote_mcp.models import (
     FONT_FAMILY_MAX_LENGTH, FONT_FAMILY_PATTERN, HEX_COLOR_PATTERN,
-    LINK_SCHEMES, Attachment, ContentItem, FloatingImage, ImagePlaceholder, InlineImage, List, ListChild, ListItem,
+    LINK_SCHEMES, Attachment, ContentItem, Tag, FloatingImage, ImagePlaceholder, InlineImage, List, ListChild, ListItem,
     Table, TableCell,
     Outline, PageContent, PageOutline, Paragraph, Position, TextRun, UnsupportedItem,
     UnsupportedPageObject,
@@ -45,6 +45,46 @@ _HEADING_STYLE_DEFS: dict[str, dict[str, str]] = {
 _HEADING_QUICK_STYLE_INDEX: dict[str, str] = {
     name: str(index) for index, name in enumerate(_HEADING_STYLE_DEFS)
 }
+
+
+# Tags, written as <one:TagDef> elements (name, symbol, type) that each
+# <one:Tag index> refers to.  Like the heading styles, the index is local to
+# the written XML; OneNote maps each definition into the page's own table.
+_TAG_DEFS: dict[str, tuple[str, str, str]] = {
+    "todo": ("To Do", "3", "0"),
+    "important": ("Important", "13", "1"),
+    "question": ("Question", "15", "2"),
+}
+_TAG_LOCAL_INDEX: dict[str, str] = {kind: str(index) for index, kind in enumerate(_TAG_DEFS)}
+_TAG_KIND_BY_SYMBOL: dict[str, str] = {symbol: kind for kind, (_, symbol, _) in _TAG_DEFS.items()}
+# Set on parsed <one:Tag> elements by parse_page: the kind their TagDef resolves to.
+_TAG_KIND_ATTR = "onenote-mcp-kind"
+
+
+def tag_def_el(kind: str, index: str) -> ET.Element:
+    """Return the <one:TagDef> for tag *kind* at *index*."""
+    name, symbol, tag_type = _TAG_DEFS[kind]
+    return ET.Element(f"{{{_ONE_NS}}}TagDef", {
+        "index": index, "type": tag_type, "symbol": symbol,
+        "fontColor": "automatic", "highlightColor": "none", "name": name,
+    })
+
+
+def _add_tag(oe: ET.Element, tag: Tag | None) -> None:
+    """Put *tag* first in *oe*: the schema wants <one:Tag> before Meta, List and text."""
+    if tag is None:
+        return
+    oe.insert(0, ET.Element(f"{{{_ONE_NS}}}Tag", {
+        "index": _TAG_LOCAL_INDEX[tag.kind], "completed": "true" if tag.checked else "false",
+    }))
+
+
+def _prepend_tag_defs(page_el: ET.Element) -> None:
+    """Insert the TagDefs the tags in *page_el* refer to; they come first on the page."""
+    used = {tag.get("index") for tag in page_el.iter(f"{{{_ONE_NS}}}Tag")}
+    kinds = [kind for kind, index in _TAG_LOCAL_INDEX.items() if index in used]
+    for position, kind in enumerate(kinds):
+        page_el.insert(position, tag_def_el(kind, _TAG_LOCAL_INDEX[kind]))
 
 
 def _quick_style_def_el(name: str) -> ET.Element:
@@ -182,6 +222,7 @@ def _paragraph_to_oe(
         html = "".join(_run_to_html(run) for run in p.segments)
         _set_t_html(t_el, html, cdata_map, cdata_counter)
 
+    _add_tag(oe, p.tag)
     _append_children(oe, _items_to_oes(p.children, cdata_map, cdata_counter))
     return oe
 
@@ -400,6 +441,7 @@ def _list_items_to_oes(
             html = "".join(_run_to_html(run) for run in item.segments)
             _set_t_html(t_el, html, cdata_map, cdata_counter)
 
+        _add_tag(oe, item.tag)
         _append_children(oe, _list_children_to_oes(item.children, list_style, cdata_map, cdata_counter))
         result.append(oe)
 
@@ -610,6 +652,7 @@ def build_page_xml(title: str, outlines: list[Outline], images: list[FloatingIma
         root.append(_floating_image_to_el(img))
 
     _prepend_quick_style_defs(root)
+    _prepend_tag_defs(root)
     xml_str = ET.tostring(root, encoding="unicode", xml_declaration=False)
     return _apply_cdata(xml_str, cdata_map)
 
@@ -623,6 +666,7 @@ def build_append_xml(outline: Outline) -> str:
     page_el = ET.Element(f"{{{_ONE_NS}}}Page")
     page_el.append(_outline_to_el(outline, cdata_map, cdata_counter))
     _prepend_quick_style_defs(page_el)
+    _prepend_tag_defs(page_el)
 
     xml_str = ET.tostring(page_el, encoding="unicode", xml_declaration=False)
     return _apply_cdata(xml_str, cdata_map)
@@ -840,6 +884,15 @@ def _oe_runs(
     return _merge_runs(runs, _quick_style_format(oe_el, quick_style_map, reproduced_styles))
 
 
+def _parse_tag(oe_el: ET.Element) -> Tag | None:
+    """Return the tag of *oe_el* that parse_page resolved to a known kind, or None."""
+    for tag_el in oe_el.findall(f"{{{_ONE_NS}}}Tag"):
+        kind = tag_el.get(_TAG_KIND_ATTR)
+        if kind is not None:
+            return Tag(kind=kind, checked=kind == "todo" and tag_el.get("completed") == "true")
+    return None
+
+
 def _parse_list_item(
     oe_el: ET.Element,
     quick_style_map: dict[str, ET.Element] | None = None,
@@ -854,13 +907,14 @@ def _parse_list_item(
     runs = _oe_runs(oe_el, quick_style_map, _LIST_ITEM_QUICK_STYLES)
     children = _parse_list_children(oe_el, quick_style_map)
     object_id = oe_el.get("objectID")
+    tag = _parse_tag(oe_el)
 
     if not runs:
-        return ListItem(id=object_id, text="", children=children)
+        return ListItem(id=object_id, text="", tag=tag, children=children)
     if len(runs) == 1 and not runs[0][1]:
-        return ListItem(id=object_id, text=runs[0][0], children=children)
+        return ListItem(id=object_id, text=runs[0][0], tag=tag, children=children)
     segments = [TextRun(text=text, **fmt) for text, fmt in runs]
-    return ListItem(id=object_id, segments=segments, children=children)
+    return ListItem(id=object_id, segments=segments, tag=tag, children=children)
 
 
 def _parse_list_children(
@@ -953,13 +1007,14 @@ def _parse_paragraph_oe(
     style = _resolve_heading_style(el, quick_style_map)
     runs = _oe_runs(el, quick_style_map, _PARAGRAPH_QUICK_STYLES)
 
+    tag = _parse_tag(el)
     if not runs:
-        return Paragraph(type="paragraph", text="", style=style, children=children)
+        return Paragraph(type="paragraph", text="", style=style, tag=tag, children=children)
     if len(runs) == 1 and "link" not in runs[0][1]:
         text, fmt = runs[0]
-        return Paragraph(type="paragraph", text=text, style=style, children=children, **fmt)
+        return Paragraph(type="paragraph", text=text, style=style, tag=tag, children=children, **fmt)
     segments = [TextRun(text=text, **fmt) for text, fmt in runs]
-    return Paragraph(type="paragraph", segments=segments, style=style, children=children)
+    return Paragraph(type="paragraph", segments=segments, style=style, tag=tag, children=children)
 
 
 def _parse_size(el: ET.Element) -> tuple[float | None, float | None]:
@@ -1365,6 +1420,18 @@ def parse_page(xml: str) -> PageContent:
         for def_el in root.findall(f"{{{_ONE_NS}}}QuickStyleDef")
         if def_el.get("index") is not None and def_el.get("name") is not None
     }
+
+    # Resolve each <one:Tag> to a kind through the page's TagDefs (by symbol,
+    # since names are localised); tags of other kinds stay unmarked and are
+    # not reported.
+    tag_kinds = {
+        def_el.get("index"): _TAG_KIND_BY_SYMBOL.get(def_el.get("symbol", ""))
+        for def_el in root.findall(f"{{{_ONE_NS}}}TagDef")
+    }
+    for tag_el in root.iter(f"{{{_ONE_NS}}}Tag"):
+        kind = tag_kinds.get(tag_el.get("index"))
+        if kind is not None:
+            tag_el.set(_TAG_KIND_ATTR, kind)
 
     # Extract title: the text of every <one:T>, OEs joined by spaces
     title = ""

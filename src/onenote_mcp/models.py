@@ -10,8 +10,9 @@ import binascii
 from typing import Annotated, Any, Literal, Union
 from onenote_mcp.images import pixel_size
 from pydantic import (
-    BaseModel, Discriminator, Field, StringConstraints, Tag, field_validator, model_validator,
+    BaseModel, Discriminator, Field, StringConstraints, field_validator, model_validator,
 )
+from pydantic import Tag as PydanticTag
 
 # Style values are written into an HTML style="..." attribute, so they are
 # restricted to characters that cannot end the declaration or the attribute.
@@ -55,6 +56,19 @@ class TextRun(BaseModel):
         return value
 
 
+class Tag(BaseModel):
+    """A OneNote tag on a paragraph or list item."""
+
+    kind: Literal["todo", "important", "question"] = Field(description="'todo' (a checkbox), 'important' (a star) or 'question' (a question mark).")
+    checked: bool = Field(False, description="Whether a 'todo' checkbox is ticked. Only a 'todo' tag can be checked.")
+
+    @model_validator(mode="after")
+    def _only_todo_checked(self) -> Tag:
+        if self.checked and self.kind != "todo":
+            raise ValueError("Only a 'todo' tag can be checked.")
+        return self
+
+
 class Paragraph(BaseModel):
     """A text paragraph."""
 
@@ -71,6 +85,7 @@ class Paragraph(BaseModel):
     highlight: HexColor | None = Field(None, description="Highlight colour as '#RGB' or '#RRGGBB'. Applied to whole paragraph when 'text' is used; ignored when 'segments' is used.")
     font_size: float | None = Field(None, description="Font size in points. Applied to whole paragraph when 'text' is used; ignored when 'segments' is used.")
     font_family: FontFamily | None = Field(None, description="Font family name (letters, digits, spaces, hyphens, commas and periods, at most 64 characters). Applied to whole paragraph when 'text' is used; ignored when 'segments' is used.")
+    tag: Tag | None = Field(None, description="A tag shown before the text, e.g. a to-do checkbox. None means no tag.")
     children: list[ContentItem] = Field(default_factory=list, description="Content indented one level under this paragraph, in order.")
 
     @model_validator(mode="after")
@@ -162,6 +177,7 @@ class ListItem(BaseModel):
     id: str | None = Field(None, description=_ID_DESCRIPTION)
     text: str | None = Field(None, description="Plain text for this list item. Mutually exclusive with 'segments' — provide exactly one.")
     segments: list[TextRun] | None = Field(None, description="Formatted text runs for this item. Mutually exclusive with 'text' — provide exactly one.")
+    tag: Tag | None = Field(None, description="A tag shown before the text, e.g. a to-do checkbox. None means no tag.")
     children: list[ListChild] = Field(default_factory=list, description="Content indented under this item, in order: sub-items (objects without 'type') for nested list levels, or any outline item with a 'type' (paragraph, inline_image, ...) for other indented content.")
 
     @model_validator(mode="after")
@@ -288,7 +304,7 @@ def _list_child_tag(value: Any) -> str:
 
 
 ListChild = Annotated[
-    Union[Annotated[ListItem, Tag("item")], Annotated[ContentItem, Tag("content")]],
+    Union[Annotated[ListItem, PydanticTag("item")], Annotated[ContentItem, PydanticTag("content")]],
     Discriminator(_list_child_tag),
 ]
 

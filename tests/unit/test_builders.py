@@ -2185,3 +2185,76 @@ def test_attachment_still_protected_from_rewrites():
     from onenote_mcp.builders import protected_items
     page_root = ET.fromstring(_outline_xml('<one:OE objectID="{F}"><one:InsertedFile preferredName="r.pdf"/></one:OE>'))
     assert protected_items(page_root) == [("{F}", "file")]
+
+
+# ---------------------------------------------------------------------------
+# Tags
+# ---------------------------------------------------------------------------
+
+from onenote_mcp.models import Tag  # noqa: E402
+
+_ONE = "{http://schemas.microsoft.com/office/onenote/2013/onenote}"
+
+
+def test_todo_written_with_tagdef():
+    xml = build_page_xml("t", [Outline(items=[Paragraph(type="paragraph", text="buy fuel", tag=Tag(kind="todo"))])])
+    page = ET.fromstring(xml)
+    (tag_def,) = page.findall(f"{_ONE}TagDef")
+    assert (tag_def.get("name"), tag_def.get("symbol"), tag_def.get("type")) == ("To Do", "3", "0")
+    assert list(page)[0] is tag_def, "TagDefs come first on the page"
+    oe = page.find(f".//{_ONE}OE[{_ONE}Tag]")
+    assert list(oe)[0].tag == f"{_ONE}Tag", "the Tag comes first in its OE"
+    assert oe.find(f"{_ONE}Tag").attrib == {"index": tag_def.get("index"), "completed": "false"}
+
+
+def test_checked_todo_sets_completed():
+    xml = build_page_xml("t", [Outline(items=[List(type="list", style="bullet", items=[
+        ListItem(text="done", tag=Tag(kind="todo", checked=True)),
+    ])])])
+    assert ET.fromstring(xml).find(f".//{_ONE}Tag").get("completed") == "true"
+
+
+def test_tagdefs_only_for_used_kinds_and_before_quick_styles():
+    xml = build_page_xml("t", [Outline(items=[
+        Paragraph(type="paragraph", text="H", style="h2", tag=Tag(kind="question")),
+        Paragraph(type="paragraph", text="!", tag=Tag(kind="important")),
+    ])])
+    names = [child.tag.split("}")[1] for child in ET.fromstring(xml)]
+    assert names[:3] == ["TagDef", "TagDef", "QuickStyleDef"]
+    assert sorted(d.get("name") for d in ET.fromstring(xml).findall(f"{_ONE}TagDef")) == ["Important", "Question"]
+
+
+def test_checked_on_important_rejected():
+    with pytest.raises(ValueError, match="Only a 'todo' tag can be checked"):
+        Tag(kind="important", checked=True)
+
+
+def test_tag_read_back():
+    xml = (f'<one:Page xmlns:one="{_ONE_NS_URI}">'
+           '<one:TagDef index="4" type="0" symbol="3" name="Zu erledigen"/>'
+           '<one:TagDef index="5" type="1" symbol="13" name="Important"/>'
+           '<one:Title><one:OE><one:T>t</one:T></one:OE></one:Title><one:Outline><one:OEChildren>'
+           '<one:OE><one:Tag index="4" completed="true"/><one:T>done</one:T></one:OE>'
+           '<one:OE><one:Tag index="5" completed="false"/><one:List><one:Bullet bullet="2"/></one:List><one:T>key</one:T></one:OE>'
+           '</one:OEChildren></one:Outline></one:Page>')
+    items = parse_page(xml).model_dump(exclude_defaults=True)["outlines"][0]["items"]
+    assert items[0] == {"type": "paragraph", "text": "done", "tag": {"kind": "todo", "checked": True}}
+    assert items[1]["items"][0] == {"text": "key", "tag": {"kind": "important"}}
+
+
+def test_unknown_tag_ignored_on_read():
+    xml = (f'<one:Page xmlns:one="{_ONE_NS_URI}"><one:TagDef index="0" type="7" symbol="99" name="Idea"/>'
+           '<one:Title><one:OE><one:T>t</one:T></one:OE></one:Title><one:Outline><one:OEChildren>'
+           '<one:OE><one:Tag index="0"/><one:T>x</one:T></one:OE></one:OEChildren></one:Outline></one:Page>')
+    assert parse_page(xml).model_dump(exclude_defaults=True)["outlines"][0]["items"] == [{"type": "paragraph", "text": "x"}]
+
+
+def test_tags_round_trip():
+    outline = Outline(items=[
+        Paragraph(type="paragraph", text="a", tag=Tag(kind="todo")),
+        Paragraph(type="paragraph", text="b", tag=Tag(kind="todo", checked=True)),
+        List(type="list", style="numbered", items=[ListItem(text="c", tag=Tag(kind="question"))]),
+    ])
+    first = parse_page(build_page_xml("t", [outline]))
+    assert _reread(first).model_dump(exclude_defaults=True) == first.model_dump(exclude_defaults=True)
+    assert first.outlines[0].items[1].tag == Tag(kind="todo", checked=True)

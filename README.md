@@ -205,6 +205,10 @@ A text run (`segments` entry) can carry `"link": "https://..."`; `http://`, `htt
 `mailto:` and `onenote:` links are accepted. Links with other schemes read back as
 plain text.
 
+Paragraphs and list items take an optional `"tag": {"kind": "todo" | "important" |
+"question", "checked": false}`; `checked` ticks a to-do box. Other OneNote tags are not
+reported and are lost if the item is rewritten.
+
 ## Images and attachments from files
 
 An image (`inline_image`, or a floating image in `images`) takes exactly one source:
